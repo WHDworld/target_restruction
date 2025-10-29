@@ -65,6 +65,7 @@ public:
      * @brief 检查深度是否有效
      */
     bool hasValidDepth() const { return depth_valid_ && depth_ > 0.0f; }
+
 };
 
 #endif // TARGET_RECON_FEATURE_H_

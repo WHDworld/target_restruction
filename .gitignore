@@ -1,0 +1,40 @@
+# Build directories
+build/
+devel/
+install/
+logs/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.so
+*.a
+*.pyc
+*.pyo
+
+# Output files
+output/*.ply
+output/*.pcd
+*.bag
+
+# Temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ROS
+CATKIN_IGNORE
+

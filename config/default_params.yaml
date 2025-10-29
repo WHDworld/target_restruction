@@ -1,0 +1,73 @@
+# ========================================
+# Target Reconstruction - Configuration
+# ========================================
+
+# ========== Image Configuration ==========
+image:
+  width: 1280
+  height: 1024
+  grid_size: 40           # Grid size for feature distribution (pixels)
+  border_pixels: 20       # Ignore border region (pixels)
+
+# ========== Depth Configuration ==========
+depth:
+  min_depth: 0.1          # Minimum valid depth (meters)
+  max_depth: 5.0          # Maximum valid depth (meters)
+  noise_threshold: 0.05   # Depth noise threshold (meters)
+
+# ========== Feature Extraction ==========
+feature:
+  min_shi_tomasi_score: 5.0    # Minimum corner response
+  max_points_per_grid: 1       # Maximum features per grid cell
+
+# ========== Quality Control ==========
+quality:
+  min_observations: 3           # Minimum observations to keep a point
+  max_reprojection_error: 2.0   # Maximum reprojection error (pixels)
+  min_confidence: 0.3           # Minimum confidence score [0, 1]
+
+# ========== Map Management ==========
+map:
+  voxel_size: 0.05       # Voxel size for map (meters), 5cm for fine reconstruction
+  enable_color: true     # Enable RGB color for points
+  enable_tsdf: false     # Enable TSDF fusion (experimental)
+
+# ========== Camera Intrinsics ==========
+# Example values for RealSense D435
+# Please calibrate and update these values for your camera
+camera:
+  fx: 615.0
+  fy: 615.0
+  cx: 320.0
+  cy: 240.0
+
+# ========== Extrinsics: IMU/Body to Camera ==========
+# Transformation from IMU (drone body) frame to camera frame
+# Update these values based on your sensor setup
+extrinsics:
+  # Rotation matrix R_i_c (row-major, 3x3)
+  # R_i_c[0]: first row
+  # R_i_c[1]: second row  
+  # R_i_c[2]: third row
+  R_i_c:
+    - [0.0, 0.0, 1.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, -1.0, 0.0]
+  
+  # Translation vector t_i_c (meters, 3x1)
+  t_i_c: [0.1, 0.0, 0.0]
+
+# ========== Processing Thread ==========
+threading:
+  max_queue_size: 10      # Maximum frame buffer size
+  # Larger values: more robust to computation spikes, more memory
+  # Smaller values: less memory, may drop frames if processing is slow
+
+# ========== Publishing ==========
+publishing:
+  rate: 5.0               # Point cloud publish rate (Hz)
+
+# ========== Output ==========
+output:
+  file: "target_reconstruction.ply"   # Output file name (relative to package output folder)
+

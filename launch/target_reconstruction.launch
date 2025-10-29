@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- ========== Configuration File ========== -->
+    <!-- Load parameters from YAML file -->
+    <arg name="config_file" default="$(find target_reconstruction)/config/default_params.yaml" />
+    
+    <!-- ========== Target Reconstruction Node ========== -->
+    <node name="target_reconstruction_node" pkg="target_reconstruction" type="target_reconstruction_node" output="screen">
+        
+        <!-- Load all parameters from YAML -->
+        <rosparam command="load" file="$(arg config_file)" />
+        
+        <!-- Override output file path (use package path) -->
+        <param name="output/file" value="$(find target_reconstruction)/output/target_reconstruction.ply" />
+        
+        <!-- ========== Topic Remapping ========== -->
+        <remap from="/camera/color/image_raw" to="/your_camera/rgb/image_raw" />
+        <remap from="/camera/depth/image_raw" to="/your_camera/depth/image_raw" />
+        
+        <!-- YOLO Segmentation Mask (255=person, 0=background) -->
+        <remap from="/yolo/person_mask" to="/yolo/person_mask" />
+        
+        <!-- Ground Truth Pose from IMU/Body Frame (e.g., from Gazebo or FAST-LIVO2) -->
+        <remap from="/camera/odom" to="/odom" />
+        <!-- Note: 
+             1. /odom 提供的是无人机本体（IMU）坐标系的位姿
+             2. 系统内部会自动转换到相机坐标系
+             3. 外参标定：R_i_c = [0 0 1; -1 0 0; 0 -1 0], t_i_c = [0.1, 0, 0]
+             4. 位姿从真值系统（如 Gazebo、Vicon、FAST-LIVO2 等）获取，无需运行额外的定位算法
+        -->
+    </node>
+    
+    <!-- ========== Optional: RViz Visualization ========== -->
+    <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find target_reconstruction)/rviz/config.rviz" /> -->
+    
+</launch>
+

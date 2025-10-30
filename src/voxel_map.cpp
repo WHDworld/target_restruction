@@ -7,8 +7,10 @@
 #include <cmath>
 #include <algorithm>
 
-VoxelMapManager::VoxelMapManager(double voxel_size)
-    : voxel_size_(voxel_size)
+VoxelMapManager::VoxelMapManager(double voxel_size, 
+                                 double fx, double fy, 
+                                 double cx, double cy)
+    : voxel_size_(voxel_size), fx_(fx), fy_(fy), cx_(cx), cy_(cy)
 {
     voxel_map_.clear();
 }
@@ -143,12 +145,7 @@ std::vector<VisualPoint*> VoxelMapManager::getPointsInBoundingBox(
 {
     std::vector<VisualPoint*> result;
     
-    // 相机内参（这里使用默认值，实际应从外部传入）
-    const double fx = 615.0;
-    const double fy = 615.0;
-    const double cx = 320.0;
-    const double cy = 240.0;
-    
+    // 使用成员变量中的相机内参
     for (const auto& pair : voxel_map_) {
         for (auto pt : pair.second->visual_points) {
             if (pt == nullptr || pt->is_outlier_) continue;
@@ -160,8 +157,8 @@ std::vector<VisualPoint*> VoxelMapManager::getPointsInBoundingBox(
             if (pt_camera.z() <= 0.01) continue;
             
             // 相机坐标 -> 像素坐标
-            int u = static_cast<int>(fx * pt_camera.x() / pt_camera.z() + cx);
-            int v = static_cast<int>(fy * pt_camera.y() / pt_camera.z() + cy);
+            int u = static_cast<int>(fx_ * pt_camera.x() / pt_camera.z() + cx_);
+            int v = static_cast<int>(fy_ * pt_camera.y() / pt_camera.z() + cy_);
             
             // 检查是否在检测框内
             if (bbox.contains(u, v)) {
@@ -183,12 +180,7 @@ std::vector<VisualPoint*> VoxelMapManager::getPointsInFrustum(
 {
     std::vector<VisualPoint*> result;
     
-    // 相机内参
-    const double fx = 615.0;
-    const double fy = 615.0;
-    const double cx = img_width / 2.0;
-    const double cy = img_height / 2.0;
-    
+    // 使用成员变量中的相机内参
     for (const auto& pair : voxel_map_) {
         for (auto pt : pair.second->visual_points) {
             if (pt == nullptr || pt->is_outlier_) continue;
@@ -200,8 +192,8 @@ std::vector<VisualPoint*> VoxelMapManager::getPointsInFrustum(
             if (pt_camera.z() < min_depth || pt_camera.z() > max_depth) continue;
             
             // 相机坐标 -> 像素坐标
-            int u = static_cast<int>(fx * pt_camera.x() / pt_camera.z() + cx);
-            int v = static_cast<int>(fy * pt_camera.y() / pt_camera.z() + cy);
+            int u = static_cast<int>(fx_ * pt_camera.x() / pt_camera.z() + cx_);
+            int v = static_cast<int>(fy_ * pt_camera.y() / pt_camera.z() + cy_);
             
             // 视野范围检查
             if (u >= 0 && u < img_width && v >= 0 && v < img_height) {

@@ -110,7 +110,9 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     
     // ========== 构造与析构 ==========
-    VoxelMapManager(double voxel_size = VOXEL_SIZE);
+    VoxelMapManager(double voxel_size = VOXEL_SIZE, 
+                    double fx = 615.0, double fy = 615.0, 
+                    double cx = 320.0, double cy = 240.0);
     ~VoxelMapManager();
     
     // ========== 地图操作 ==========
@@ -238,6 +240,10 @@ private:
     // ========== 内部数据结构 ==========
     std::unordered_map<VOXEL_LOCATION, VOXEL_POINTS*> voxel_map_;  // 主地图
     double voxel_size_;                                             // 体素大小
+    
+    // ========== 相机内参 ==========
+    double fx_, fy_;  // 焦距
+    double cx_, cy_;  // 主点
     
     // ========== 辅助函数 ==========
     /**

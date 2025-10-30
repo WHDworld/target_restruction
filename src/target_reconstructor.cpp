@@ -14,8 +14,8 @@
 TargetReconstructor::TargetReconstructor(const ReconstructionConfig& config)
     : config_(config), frame_count_(0), total_points_created_(0), total_observations_(0)
 {
-    // 创建地图管理器
-    map_manager_ = new VoxelMapManager(config_.voxel_size);
+    // 地图管理器将在initROS中创建（需要先读取相机内参）
+    map_manager_ = nullptr;
     
     // 初始化相机内参（默认值）
     fx_ = 615.0;
@@ -60,6 +60,13 @@ void TargetReconstructor::initROS(ros::NodeHandle& nh)
     
     ROS_INFO("Camera intrinsics: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f", 
              fx_, fy_, cx_, cy_);
+    
+    // 创建地图管理器（使用读取到的相机内参）
+    if (map_manager_ != nullptr) {
+        delete map_manager_;
+    }
+    map_manager_ = new VoxelMapManager(config_.voxel_size, fx_, fy_, cx_, cy_);
+    ROS_INFO("VoxelMapManager created with camera intrinsics");
     
     // 订阅话题（暂时注释，等创建自定义消息后启用）
     // ros::Subscriber rgb_sub = nh.subscribe("/camera/color/image_raw", 1, 

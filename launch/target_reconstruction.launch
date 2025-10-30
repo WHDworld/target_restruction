@@ -14,19 +14,21 @@
         <param name="output/file" value="$(find target_reconstruction)/output/target_reconstruction.ply" />
         
         <!-- ========== Topic Remapping ========== -->
-        <remap from="/camera/color/image_raw" to="/your_camera/rgb/image_raw" />
-        <remap from="/camera/depth/image_raw" to="/your_camera/depth/image_raw" />
+        <!-- Topic names are configured in YAML file (topics section) -->
+        <!-- You can override specific topics here if needed -->
         
-        <!-- YOLO Segmentation Mask (255=person, 0=background) -->
+        <!-- Example: Remap to actual hardware topics -->
+        <remap from="/camera/color/image_raw" to="/realsense/depth_camera/color/image_raw" />
+        <remap from="/camera/depth/image_raw" to="/realsense/depth_camera/depth/image_raw" />
         <remap from="/yolo/person_mask" to="/yolo/person_mask" />
+        <remap from="/camera/odom" to="/mavros/local_position/odom" />
         
-        <!-- Ground Truth Pose from IMU/Body Frame (e.g., from Gazebo or FAST-LIVO2) -->
-        <remap from="/camera/odom" to="/odom" />
         <!-- Note: 
-             1. /odom 提供的是无人机本体（IMU）坐标系的位姿
-             2. 系统内部会自动转换到相机坐标系
-             3. 外参标定：R_i_c = [0 0 1; -1 0 0; 0 -1 0], t_i_c = [0.1, 0, 0]
-             4. 位姿从真值系统（如 Gazebo、Vicon、FAST-LIVO2 等）获取，无需运行额外的定位算法
+             1. Topics are first read from YAML config file
+             2. /camera/odom 提供的是无人机本体（IMU）坐标系的位姿
+             3. 系统内部会自动转换到相机坐标系
+             4. 外参标定在 YAML 文件的 extrinsics 部分配置
+             5. 位姿从真值系统（如 Gazebo、Vicon、FAST-LIVO2 等）获取，无需运行额外的定位算法
         -->
     </node>
     

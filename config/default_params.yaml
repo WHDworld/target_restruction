@@ -32,14 +32,33 @@ map:
   enable_color: true     # Enable RGB color for points
   enable_tsdf: false     # Enable TSDF fusion (experimental)
 
+# ========== ROS Topics ==========
+# Topic names for subscribing to sensor data
+topics:
+  # RGB camera topic
+  rgb_image: "/realsense/depth_camera/color/image_raw"
+  
+  # Depth camera topic
+  depth_image: "/realsense/depth_camera/depth/image_raw"
+  
+  # YOLO person segmentation mask (255=person, 0=background)
+  person_mask: "/yolo/person_mask"
+  
+  # Odometry topic (IMU/Body frame pose from ground truth system)
+  # e.g., from Gazebo, Vicon, FAST-LIVO2, etc.
+  odometry: "/mavros/local_position/odom"
+  
+  # Point cloud output topic (published by this node)
+  pointcloud_output: "/target_reconstruction/points"
+
 # ========== Camera Intrinsics ==========
 # Example values for RealSense D435
 # Please calibrate and update these values for your camera
 camera:
-  fx: 615.0
-  fy: 615.0
-  cx: 320.0
-  cy: 240.0
+  fx: 639.9976491530514
+  fy: 639.9976491530514
+  cx: 640.5
+  cy: 512.5
 
 # ========== Extrinsics: IMU/Body to Camera ==========
 # Transformation from IMU (drone body) frame to camera frame

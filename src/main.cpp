@@ -145,16 +145,24 @@ public:
         reconstructor_ = new TargetReconstructor(config);
         reconstructor_->initROS(nh_);
         
+        // 从参数服务器读取话题名称
+        std::string rgb_topic, depth_topic, mask_topic, odom_topic, cloud_out_topic;
+        nh_private_.param<std::string>("topics/rgb_image", rgb_topic, "/camera/color/image_raw");
+        nh_private_.param<std::string>("topics/depth_image", depth_topic, "/camera/depth/image_raw");
+        nh_private_.param<std::string>("topics/person_mask", mask_topic, "/yolo/person_mask");
+        nh_private_.param<std::string>("topics/odometry", odom_topic, "/camera/odom");
+        nh_private_.param<std::string>("topics/pointcloud_output", cloud_out_topic, "/target_reconstruction/points");
+        
         // 发布器
-        cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/target_reconstruction/pointcloud", 1);
+        cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(cloud_out_topic, 1);
         
         // 订阅器（RGB+Depth+Odom 使用同步，Mask 单独订阅）
-        rgb_sub_.subscribe(nh_, "/camera/color/image_raw", 1);
-        depth_sub_.subscribe(nh_, "/camera/depth/image_raw", 1);
-        odom_sub_.subscribe(nh_, "/camera/odom", 1);
+        rgb_sub_.subscribe(nh_, rgb_topic, 1);
+        depth_sub_.subscribe(nh_, depth_topic, 1);
+        odom_sub_.subscribe(nh_, odom_topic, 1);
         
         // Mask 单独订阅（因为有推理延迟，且不连续发布）
-        mask_sub_ = nh_.subscribe("/yolo/person_mask", 1, 
+        mask_sub_ = nh_.subscribe(mask_topic, 1, 
                                    &TargetReconstructionNode::maskCallback, this);
         
         // 同步策略（只同步 RGB + Depth + Odom）
@@ -174,11 +182,16 @@ public:
         ROS_INFO("Target Reconstruction Node initialized successfully!");
         ROS_INFO("Architecture: Producer-Consumer with processing thread");
         ROS_INFO("  Max queue size: %d frames", max_queue_size_);
+        ROS_INFO("==========================================================");
+        ROS_INFO("Subscribed Topics:");
+        ROS_INFO("  - RGB:   %s (synchronized)", rgb_topic.c_str());
+        ROS_INFO("  - Depth: %s (synchronized)", depth_topic.c_str());
+        ROS_INFO("  - Odom:  %s (synchronized)", odom_topic.c_str());
+        ROS_INFO("  - Mask:  %s (separate, cached)", mask_topic.c_str());
+        ROS_INFO("Published Topics:");
+        ROS_INFO("  - Cloud: %s", cloud_out_topic.c_str());
+        ROS_INFO("==========================================================");
         ROS_INFO("Waiting for synchronized data...");
-        ROS_INFO("  - RGB: /camera/color/image_raw (synchronized)");
-        ROS_INFO("  - Depth: /camera/depth/image_raw (synchronized)");
-        ROS_INFO("  - Odom: /camera/odom (synchronized)");
-        ROS_INFO("  - Mask: /yolo/person_mask (separate, cached)");
     }
     
     ~TargetReconstructionNode()

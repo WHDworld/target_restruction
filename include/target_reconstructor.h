@@ -225,6 +225,9 @@ public:
     void bboxCallback(const geometry_msgs::PoseStampedConstPtr& msg);  // 临时使用，后续改为自定义消息
     void poseCallback(const geometry_msgs::PoseStampedConstPtr& msg);
     
+    // ========== 相机内参（public以便外部访问）==========
+    double fx_, fy_, cx_, cy_;          // 焦距和主点
+    
 private:
     // ========== 配置参数 ==========
     ReconstructionConfig config_;
@@ -239,9 +242,6 @@ private:
     M3D current_R_;                     // 相机到世界的旋转
     V3D current_t_;                     // 相机到世界的平移
     double current_timestamp_;
-    
-    // 相机内参
-    double fx_, fy_, cx_, cy_;          // 焦距和主点
     
     // 网格划分（用于特征选择）
     int grid_n_width_;                  // 网格列数

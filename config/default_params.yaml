@@ -48,8 +48,12 @@ topics:
   # e.g., from Gazebo, Vicon, FAST-LIVO2, etc.
   odometry: "/mavros/local_position/odom"
   
-  # Point cloud output topic (published by this node)
+  # Point cloud output topics (published by this node)
   pointcloud_output: "/target_reconstruction/points"
+  
+  # Raw depth point clouds
+  depth_cloud_body: "/target_reconstruction/depth_cloud_body"     # 机体坐标系 (frame: camera_init)
+  depth_cloud_global: "/target_reconstruction/depth_cloud_global" # 全局坐标系 (frame: map)
 
 # ========== Camera Intrinsics ==========
 # Example values for RealSense D435

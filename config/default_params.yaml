@@ -49,11 +49,13 @@ topics:
   odometry: "/mavros/local_position/odom"
   
   # Point cloud output topics (published by this node)
-  pointcloud_output: "/target_reconstruction/points"
+  # Reconstructed point clouds (融合重建后的点云)
+  reconstructed_cloud_global: "/target_reconstruction/reconstructed_cloud_global"  # 累积地图 - 全局系 (frame: map)
+  reconstructed_cloud_body: "/target_reconstruction/reconstructed_cloud_body"      # 当前帧重建点 - 机体系 (frame: body)
   
-  # Raw depth point clouds
-  depth_cloud_body: "/target_reconstruction/depth_cloud_body"     # 机体坐标系 (frame: camera_init)
-  depth_cloud_global: "/target_reconstruction/depth_cloud_global" # 全局坐标系 (frame: map)
+  # Raw depth point clouds (当前帧原始深度点云，全部像素降采样)
+  depth_cloud_body: "/target_reconstruction/depth_cloud_body"     # 机体系 (frame: body)
+  depth_cloud_global: "/target_reconstruction/depth_cloud_global" # 全局系 (frame: map)
 
 # ========== Camera Intrinsics ==========
 # Example values for RealSense D435

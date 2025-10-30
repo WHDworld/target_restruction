@@ -36,8 +36,10 @@ struct FrameData
     cv::Mat mask;  // 可能为空
     
     // 位姿数据
-    Eigen::Matrix3d camera_R;
-    Eigen::Vector3d camera_t;
+    Eigen::Matrix3d camera_R;      // 相机姿态（世界到相机）
+    Eigen::Vector3d camera_t;      // 相机位置（世界系）
+    Eigen::Matrix3d R_w_i;         // 机体姿态（世界到机体）
+    Eigen::Vector3d t_w_i;         // 机体位置（世界系）
     
     // 包围框（从mask计算得到）
     BoundingBox bbox;
@@ -146,18 +148,22 @@ public:
         reconstructor_->initROS(nh_);
         
         // 从参数服务器读取话题名称
-        std::string rgb_topic, depth_topic, mask_topic, odom_topic, cloud_out_topic;
+        std::string rgb_topic, depth_topic, mask_topic, odom_topic;
+        std::string cloud_global_topic, cloud_body_topic;
         std::string depth_cloud_body_topic, depth_cloud_global_topic;
+        
         nh_private_.param<std::string>("topics/rgb_image", rgb_topic, "/camera/color/image_raw");
         nh_private_.param<std::string>("topics/depth_image", depth_topic, "/camera/depth/image_raw");
         nh_private_.param<std::string>("topics/person_mask", mask_topic, "/yolo/person_mask");
         nh_private_.param<std::string>("topics/odometry", odom_topic, "/camera/odom");
-        nh_private_.param<std::string>("topics/pointcloud_output", cloud_out_topic, "/target_reconstruction/points");
+        nh_private_.param<std::string>("topics/reconstructed_cloud_global", cloud_global_topic, "/target_reconstruction/reconstructed_cloud_global");
+        nh_private_.param<std::string>("topics/reconstructed_cloud_body", cloud_body_topic, "/target_reconstruction/reconstructed_cloud_body");
         nh_private_.param<std::string>("topics/depth_cloud_body", depth_cloud_body_topic, "/target_reconstruction/depth_cloud_body");
         nh_private_.param<std::string>("topics/depth_cloud_global", depth_cloud_global_topic, "/target_reconstruction/depth_cloud_global");
         
         // 发布器
-        cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(cloud_out_topic, 1);
+        cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(cloud_global_topic, 1);
+        reconstructed_cloud_body_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(cloud_body_topic, 1);
         depth_cloud_body_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(depth_cloud_body_topic, 1);
         depth_cloud_global_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(depth_cloud_global_topic, 1);
         
@@ -194,9 +200,10 @@ public:
         ROS_INFO("  - Odom:  %s (synchronized)", odom_topic.c_str());
         ROS_INFO("  - Mask:  %s (separate, cached)", mask_topic.c_str());
         ROS_INFO("Published Topics:");
-        ROS_INFO("  - Reconstructed Cloud: %s", cloud_out_topic.c_str());
-        ROS_INFO("  - Depth Cloud (Body):  %s (frame: camera_init)", depth_cloud_body_topic.c_str());
-        ROS_INFO("  - Depth Cloud (Map):   %s (frame: map)", depth_cloud_global_topic.c_str());
+        ROS_INFO("  - Reconstructed Cloud (Global): %s (frame: map, accumulated)", cloud_global_topic.c_str());
+        ROS_INFO("  - Reconstructed Cloud (Body):   %s (frame: body, current frame)", cloud_body_topic.c_str());
+        ROS_INFO("  - Depth Cloud (Body):           %s (frame: body)", depth_cloud_body_topic.c_str());
+        ROS_INFO("  - Depth Cloud (Global):         %s (frame: map)", depth_cloud_global_topic.c_str());
         ROS_INFO("==========================================================");
         ROS_INFO("Waiting for synchronized data...");
     }
@@ -328,6 +335,10 @@ private:
                                   odom_msg->pose.pose.position.y,
                                   odom_msg->pose.pose.position.z);
             
+            // 保存机体位姿
+            frame.R_w_i = R_w_i;
+            frame.t_w_i = t_w_i;
+            
             // 坐标系变换：IMU系 -> 相机系
             // T_w_c = T_w_i * T_i_c
             // R_w_c = R_w_i * R_i_c
@@ -407,8 +418,18 @@ private:
                         frame.camera_t, 
                         frame.timestamp);
                     
-                    // 2. 发布原始深度点云
+                    // 2. 发布原始深度点云（机体系 + 全局系）
                     publishDepthClouds(frame);
+                    
+                    // 3. 发布当前帧重建点云（机体系）
+                    publishCurrentFrameReconstructedCloud(frame);
+                    
+                    // 4. 更新最后一帧的位姿（用于累积地图的机体系发布）
+                    {
+                        std::lock_guard<std::mutex> lock(pose_mutex_);
+                        last_R_w_i_ = frame.R_w_i;
+                        last_t_w_i_ = frame.t_w_i;
+                    }
                     
                     frame_count_processed_++;
                     
@@ -419,6 +440,67 @@ private:
         }
         
         ROS_INFO("Processing thread stopped!");
+    }
+    
+    // 发布当前帧重建点云（机体坐标系）
+    void publishCurrentFrameReconstructedCloud(const FrameData& frame)
+    {
+        if (reconstructed_cloud_body_pub_.getNumSubscribers() == 0) return;
+        
+        // 从重建器获取当前帧生成的点（相机坐标系）
+        std::vector<V3D> points_camera, colors;
+        reconstructor_->getLastFramePoints(points_camera, colors);
+        
+        if (points_camera.empty()) {
+            return;
+        }
+        
+        // 转换到机体坐标系: p_body = R_i_c^T * (p_camera - t_i_c)
+        std::vector<Eigen::Vector3d> points_body;
+        points_body.reserve(points_camera.size());
+        
+        Eigen::Matrix3d R_c_i = R_i_c_.transpose();
+        for (const auto& p_cam : points_camera) {
+            Eigen::Vector3d p_body = R_c_i * (p_cam - t_i_c_);
+            points_body.push_back(p_body);
+        }
+        
+        // 创建点云消息
+        sensor_msgs::PointCloud2 cloud_msg;
+        cloud_msg.header.stamp = ros::Time::now();
+        cloud_msg.header.frame_id = "body";
+        cloud_msg.height = 1;
+        cloud_msg.width = points_body.size();
+        cloud_msg.is_dense = true;
+        cloud_msg.is_bigendian = false;
+        
+        sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+        modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
+        modifier.resize(points_body.size());
+        
+        sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+        sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+        sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+        sensor_msgs::PointCloud2Iterator<uint8_t> iter_r(cloud_msg, "r");
+        sensor_msgs::PointCloud2Iterator<uint8_t> iter_g(cloud_msg, "g");
+        sensor_msgs::PointCloud2Iterator<uint8_t> iter_b(cloud_msg, "b");
+        
+        for (size_t i = 0; i < points_body.size(); ++i) {
+            *iter_x = points_body[i].x();
+            *iter_y = points_body[i].y();
+            *iter_z = points_body[i].z();
+            *iter_r = static_cast<uint8_t>(colors[i].x());
+            *iter_g = static_cast<uint8_t>(colors[i].y());
+            *iter_b = static_cast<uint8_t>(colors[i].z());
+            
+            ++iter_x; ++iter_y; ++iter_z;
+            ++iter_r; ++iter_g; ++iter_b;
+        }
+        
+        reconstructed_cloud_body_pub_.publish(cloud_msg);
+        
+        ROS_INFO_THROTTLE(5.0, "Published current frame reconstructed cloud: %zu points (body frame)", 
+                         points_body.size());
     }
     
     // 从 mask 计算包围框
@@ -489,12 +571,16 @@ private:
                     continue;
                 }
                 
-                // 反投影到相机坐标系（机体坐标系）
-                double x = (u - cx) * depth / fx;
-                double y = (v - cy) * depth / fy;
-                double z = depth;
+                // 1. 反投影到相机坐标系
+                Eigen::Vector3d p_camera;
+                p_camera.x() = (u - cx) * depth / fx;
+                p_camera.y() = (v - cy) * depth / fy;
+                p_camera.z() = depth;
                 
-                points_body.push_back(Eigen::Vector3d(x, y, z));
+                // 2. 转换到机体坐标系: p_body = R_i_c^T * (p_camera - t_i_c)
+                Eigen::Vector3d p_body = R_i_c_.transpose() * (p_camera - t_i_c_);
+                
+                points_body.push_back(p_body);
                 
                 // 获取颜色（如果有RGB图）
                 if (!frame.rgb_img.empty() && 
@@ -507,11 +593,11 @@ private:
             }
         }
         
-        // 1. 发布机体坐标系点云（frame_id: camera_init）
+        // 1. 发布机体坐标系点云（frame_id: body）
         if (!points_body.empty() && depth_cloud_body_pub_.getNumSubscribers() > 0) {
             sensor_msgs::PointCloud2 cloud_body_msg;
             cloud_body_msg.header.stamp = ros::Time::now();
-            cloud_body_msg.header.frame_id = "camera_init";
+            cloud_body_msg.header.frame_id = "body";
             cloud_body_msg.height = 1;
             cloud_body_msg.width = points_body.size();
             cloud_body_msg.is_dense = true;
@@ -599,57 +685,54 @@ private:
     {
         if (!got_first_data_) return;
         
-        // 从地图导出点云
-        std::vector<V3D> points;
+        // 从地图导出点云（全局坐标系累积地图）
+        std::vector<V3D> points_global;
         std::vector<V3D> colors;
-        reconstructor_->getMapManager()->exportPointCloud(points, &colors);
+        reconstructor_->getMapManager()->exportPointCloud(points_global, &colors);
         
-        if (points.empty()) {
+        if (points_global.empty()) {
             ROS_WARN_THROTTLE(10.0, "No points to publish yet");
             return;
         }
         
-        // 创建PointCloud2消息
-        sensor_msgs::PointCloud2 cloud_msg;
-        cloud_msg.header.stamp = ros::Time::now();
-        cloud_msg.header.frame_id = "world";  // 或从参数读取
-        
-        cloud_msg.height = 1;
-        cloud_msg.width = points.size();
-        cloud_msg.is_dense = false;
-        cloud_msg.is_bigendian = false;
-        
-        // 定义字段
-        sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
-        modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
-        modifier.resize(points.size());
-        
-        // 迭代器
-        sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
-        sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
-        sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
-        sensor_msgs::PointCloud2Iterator<uint8_t> iter_r(cloud_msg, "r");
-        sensor_msgs::PointCloud2Iterator<uint8_t> iter_g(cloud_msg, "g");
-        sensor_msgs::PointCloud2Iterator<uint8_t> iter_b(cloud_msg, "b");
-        
-        // 填充数据
-        for (size_t i = 0; i < points.size(); ++i) {
-            *iter_x = points[i].x();
-            *iter_y = points[i].y();
-            *iter_z = points[i].z();
+        // 发布全局系累积重建点云 (frame_id: map)
+        if (cloud_pub_.getNumSubscribers() > 0) {
+            sensor_msgs::PointCloud2 cloud_msg_global;
+            cloud_msg_global.header.stamp = ros::Time::now();
+            cloud_msg_global.header.frame_id = "map";
+            cloud_msg_global.height = 1;
+            cloud_msg_global.width = points_global.size();
+            cloud_msg_global.is_dense = false;
+            cloud_msg_global.is_bigendian = false;
             
-            *iter_r = static_cast<uint8_t>(colors[i].x());
-            *iter_g = static_cast<uint8_t>(colors[i].y());
-            *iter_b = static_cast<uint8_t>(colors[i].z());
+            sensor_msgs::PointCloud2Modifier modifier_global(cloud_msg_global);
+            modifier_global.setPointCloud2FieldsByString(2, "xyz", "rgb");
+            modifier_global.resize(points_global.size());
             
-            ++iter_x; ++iter_y; ++iter_z;
-            ++iter_r; ++iter_g; ++iter_b;
+            sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg_global, "x");
+            sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg_global, "y");
+            sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg_global, "z");
+            sensor_msgs::PointCloud2Iterator<uint8_t> iter_r(cloud_msg_global, "r");
+            sensor_msgs::PointCloud2Iterator<uint8_t> iter_g(cloud_msg_global, "g");
+            sensor_msgs::PointCloud2Iterator<uint8_t> iter_b(cloud_msg_global, "b");
+            
+            for (size_t i = 0; i < points_global.size(); ++i) {
+                *iter_x = points_global[i].x();
+                *iter_y = points_global[i].y();
+                *iter_z = points_global[i].z();
+                *iter_r = static_cast<uint8_t>(colors[i].x());
+                *iter_g = static_cast<uint8_t>(colors[i].y());
+                *iter_b = static_cast<uint8_t>(colors[i].z());
+                
+                ++iter_x; ++iter_y; ++iter_z;
+                ++iter_r; ++iter_g; ++iter_b;
+            }
+            
+            cloud_pub_.publish(cloud_msg_global);
+            
+            ROS_INFO_THROTTLE(5.0, "Published accumulated reconstructed cloud: %zu points (global frame)", 
+                              points_global.size());
         }
-        
-        // 发布
-        cloud_pub_.publish(cloud_msg);
-        
-        ROS_INFO_THROTTLE(5.0, "Published point cloud with %zu points", points.size());
     }
     
 private:
@@ -677,9 +760,10 @@ private:
     std::mutex mask_mutex_;
     
     // 发布器
-    ros::Publisher cloud_pub_;
-    ros::Publisher depth_cloud_body_pub_;   // 机体坐标系深度点云
-    ros::Publisher depth_cloud_global_pub_; // 全局坐标系深度点云
+    ros::Publisher cloud_pub_;                      // 全局系重建点云
+    ros::Publisher reconstructed_cloud_body_pub_;   // 机体系重建点云
+    ros::Publisher depth_cloud_body_pub_;           // 机体系原始深度点云
+    ros::Publisher depth_cloud_global_pub_;         // 全局系原始深度点云
     ros::Timer publish_timer_;
     
     double publish_rate_;
@@ -707,6 +791,11 @@ private:
     // IMU(无人机本体)到相机的外参变换
     Eigen::Matrix3d R_i_c_;  // 旋转矩阵
     Eigen::Vector3d t_i_c_;  // 平移向量
+    
+    // ========== 当前位姿（用于坐标转换） ==========
+    Eigen::Matrix3d last_R_w_i_;  // 最后一帧的机体姿态（世界到机体）
+    Eigen::Vector3d last_t_w_i_;  // 最后一帧的机体位置（世界系）
+    std::mutex pose_mutex_;       // 位姿互斥锁
 };
 
 int main(int argc, char** argv)

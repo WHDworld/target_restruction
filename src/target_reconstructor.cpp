@@ -68,12 +68,6 @@ void TargetReconstructor::initROS(ros::NodeHandle& nh)
     map_manager_ = new VoxelMapManager(config_.voxel_size, fx_, fy_, cx_, cy_);
     ROS_INFO("VoxelMapManager created with camera intrinsics");
     
-    // 订阅话题（暂时注释，等创建自定义消息后启用）
-    // ros::Subscriber rgb_sub = nh.subscribe("/camera/color/image_raw", 1, 
-    //     &TargetReconstructor::rgbCallback, this);
-    // ros::Subscriber depth_sub = nh.subscribe("/camera/depth/image_raw", 1,
-    //     &TargetReconstructor::depthCallback, this);
-    
     // 发布重建点云
     static ros::Publisher cloud_pub = nh.advertise<sensor_msgs::PointCloud2>(
         "/target_reconstruction/pointcloud", 1);
@@ -275,6 +269,10 @@ void TargetReconstructor::generateVisualPointsWithMask(
     const M3D& camera_R,
     const V3D& camera_t)
 {
+    // 清空上一帧的点云缓存
+    last_frame_points_.clear();
+    last_frame_colors_.clear();
+    
     // 转换为灰度图
     Mat gray_img;
     if (rgb_img.channels() == 3) {
@@ -310,6 +308,11 @@ void TargetReconstructor::generateVisualPointsWithMask(
         
         if (!isDepthValid(depth)) continue;
         
+        // 计算相机坐标系下的点（用于实时发布）
+        double x_norm = (px.x() - cx_) / fx_;
+        double y_norm = (px.y() - cy_) / fy_;
+        V3D pt_camera(x_norm * depth, y_norm * depth, depth);
+        
         // 像素 + 深度 -> 3D世界坐标
         V3D pos_3d = pixelToWorld(px, depth, camera_R, camera_t);
         
@@ -319,6 +322,10 @@ void TargetReconstructor::generateVisualPointsWithMask(
             cv::Vec3b bgr = rgb_img.at<cv::Vec3b>(y, x);
             color = V3D(bgr[2], bgr[1], bgr[0]);  // BGR -> RGB
         }
+        
+        // 缓存当前帧的点（相机坐标系）
+        last_frame_points_.push_back(pt_camera);
+        last_frame_colors_.push_back(color);
         
         // 提取图像Patch
         float patch[PATCH_SIZE_TOTAL];

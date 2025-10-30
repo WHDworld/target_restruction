@@ -228,6 +228,16 @@ public:
     // ========== 相机内参（public以便外部访问）==========
     double fx_, fy_, cx_, cy_;          // 焦距和主点
     
+    /**
+     * @brief 获取最后一帧生成的点云（相机坐标系）
+     * @param points 输出：点坐标
+     * @param colors 输出：点颜色
+     */
+    void getLastFramePoints(std::vector<V3D>& points, std::vector<V3D>& colors) const {
+        points = last_frame_points_;
+        colors = last_frame_colors_;
+    }
+    
 private:
     // ========== 配置参数 ==========
     ReconstructionConfig config_;
@@ -253,6 +263,10 @@ private:
     int frame_count_;
     int total_points_created_;
     int total_observations_;
+    
+    // 当前帧生成的点云（用于实时发布）
+    std::vector<V3D> last_frame_points_;    // 相机坐标系下的点
+    std::vector<V3D> last_frame_colors_;    // 对应的颜色
     
     // ========== 辅助函数 ==========
     /**

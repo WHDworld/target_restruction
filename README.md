@@ -22,22 +22,99 @@ target_restruction/
 
 ## 🎯 核心设计思想
 
-### 1. 数据流
+### 1. 数据流（生产者-消费者架构）
 
 ```mermaid
-graph LR
-    A[RGB相机] --> E[TargetReconstructor]
-    B[深度相机] --> E
-    C[目标检测] --> E
-    D[相机位姿] --> E
-    E --> F[特征提取]
-    F --> G[3D点生成]
-    G --> H[VoxelMapManager]
-    H --> I[视觉点融合]
-    I --> J[3D重建模型]
+graph TB
+    subgraph "生产者线程 (ROS Callbacks)"
+        A[RGB相机<br/>/camera/color/image_raw] --> S[syncCallback<br/>消息同步]
+        B[深度相机<br/>/camera/depth/image_raw] --> S
+        C[目标检测<br/>/yolo/person_mask] --> M[maskCallback<br/>Mask缓存]
+        D[位姿<br/>/mavros/local_position/odom] --> S
+        
+        M --> S
+        S --> E[数据预处理<br/>1. 图像格式转换<br/>2. Mask提取<br/>3. BoundingBox计算<br/>4. 坐标变换]
+        E --> F[FrameData<br/>数据队列]
+    end
+    
+    subgraph "消费者线程 (Processing Thread)"
+        F --> G[processFrameWithMask<br/>特征提取与点生成]
+        G --> H[VoxelMapManager<br/>地图管理]
+        H --> I[视觉点融合<br/>多帧观测]
+        I --> J[地图优化<br/>离群点移除]
+    end
+    
+    subgraph "发布线程 (Timer Callbacks)"
+        J --> K[发布点云<br/>1. 深度点云 body/map<br/>2. 重建点云 body/map]
+    end
+    
+    style F fill:#ffcccc
+    style G fill:#ccffcc
+    style K fill:#ccccff
 ```
 
-### 2. 核心类关系
+**关键特性**：
+- 🔄 **异步处理**：回调函数只负责数据同步和入队，不阻塞ROS消息接收
+- 📦 **队列缓冲**：`std::deque<FrameData>` 存储待处理帧，支持丢帧策略
+- 🧵 **线程安全**：使用 `std::mutex` 和 `std::condition_variable` 保护队列
+- ⚡ **实时性**：处理线程独立运行，避免回调函数耗时过长
+
+### 2. FrameData 结构（队列元素）
+
+```cpp
+struct FrameData {
+    cv::Mat rgb_img;              // RGB图像
+    cv::Mat depth_img;            // 深度图像
+    cv::Mat mask;                 // 目标分割mask（255=人，0=背景）
+    BoundingBox bbox;             // 从mask计算的包围框
+    
+    // 相机位姿（World to Camera）
+    Eigen::Matrix3d camera_R;     // 相机到世界的旋转 (R_c_w)
+    Eigen::Vector3d camera_t;     // 相机在世界坐标系的位置 (t_c_w)
+    
+    // 机体位姿（用于点云变换）
+    Eigen::Matrix3d R_w_i;        // 世界到IMU的旋转
+    Eigen::Vector3d t_w_i;        // IMU在世界坐标系的位置
+    
+    double timestamp;             // 时间戳
+};
+```
+
+**队列管理策略**：
+- 最大队列长度：10帧（可配置）
+- 丢帧策略：队列满时丢弃最旧的帧
+- 线程同步：`std::condition_variable` 通知处理线程
+
+### 3. 线程模型
+
+```mermaid
+sequenceDiagram
+    participant ROS as ROS Callback<br/>(生产者)
+    participant Queue as FrameData Queue<br/>(线程安全队列)
+    participant Proc as Processing Thread<br/>(消费者)
+    participant Pub as Timer Thread<br/>(发布者)
+    
+    ROS->>ROS: 1. 接收消息（RGB+Depth+Odom）
+    ROS->>ROS: 2. 图像转换 & Mask获取
+    ROS->>ROS: 3. 计算BoundingBox
+    ROS->>ROS: 4. 坐标变换（IMU→Camera）
+    ROS->>Queue: 5. 加锁 & 入队
+    ROS->>Proc: 6. notify_one()
+    
+    Proc->>Queue: 7. wait() & 出队
+    Proc->>Proc: 8. 特征提取（Shi-Tomasi）
+    Proc->>Proc: 9. 3D点生成
+    Proc->>Proc: 10. 插入VoxelMap
+    Proc->>Proc: 11. 多帧融合
+    Proc->>Proc: 12. 发布当前帧点云
+    
+    loop 每0.5秒
+        Pub->>Pub: 13. 导出全局地图
+        Pub->>Pub: 14. 发布累积点云
+    end
+```
+
+### 4. 核心类关系
 
 ```mermaid
 classDiagram
@@ -82,6 +159,52 @@ classDiagram
     VisualPoint "n" --> "1" VOXEL_POINTS : 存储
     VOXEL_POINTS "n" --> "1" VoxelMapManager : 管理
     TargetReconstructor "1" --> "1" VoxelMapManager : 使用
+```
+
+## 📐 坐标系与变换
+
+### 坐标系定义
+
+```mermaid
+graph LR
+    A[World/Map<br/>全局坐标系] -->|R_w_i, t_w_i| B[Body/IMU<br/>机体坐标系]
+    B -->|R_i_c, t_i_c<br/>外参标定| C[Camera<br/>相机坐标系]
+    C -->|内参 fx,fy,cx,cy| D[Image<br/>像素坐标系]
+```
+
+**变换关系**：
+- `R_i_c = [0, 0, 1; -1, 0, 0; 0, -1, 0]` - IMU到相机旋转
+- `t_i_c = [0.1, 0, 0]` - IMU到相机平移（米）
+- `R_c_w = R_w_i * R_i_c` - 相机到世界旋转
+- `t_c_w = R_w_i * t_i_c + t_w_i` - 相机在世界坐标系的位置
+
+### 关键公式
+
+**像素 → 世界坐标**（深度已知）：
+```cpp
+// 1. 像素 → 归一化平面
+double x_norm = (u - cx) / fx;
+double y_norm = (v - cy) / fy;
+
+// 2. 归一化平面 → 相机坐标
+V3D p_camera(x_norm * depth, y_norm * depth, depth);
+
+// 3. 相机坐标 → 世界坐标
+V3D p_world = R_c_w * p_camera + t_c_w;
+```
+
+**世界坐标 → 像素**（重投影）：
+```cpp
+// 1. 世界坐标 → 相机坐标
+V3D p_camera = R_c_w.transpose() * (p_world - t_c_w);
+
+// 2. 相机坐标 → 归一化平面
+double x_norm = p_camera.x() / p_camera.z();
+double y_norm = p_camera.y() / p_camera.z();
+
+// 3. 归一化平面 → 像素
+double u = fx * x_norm + cx;
+double v = fy * y_norm + cy;
 ```
 
 ## 🔑 关键改进点（相比FAST-LIVO2）
@@ -138,61 +261,90 @@ for (auto pt : visible_pts) {
 
 ## 🚀 使用流程
 
-### 步骤1：初始化
+### 步骤1：配置参数（YAML）
 
-```cpp
-// 配置参数
-ReconstructionConfig config;
-config.voxel_size = 0.05;  // 5cm体素
-config.enable_color = true;
-config.min_observations = 5;
+```yaml
+# config/default_params.yaml
+image:
+  width: 640
+  height: 480
 
-// 创建重建器
-TargetReconstructor reconstructor(config);
+camera:
+  fx: 615.0
+  fy: 615.0
+  cx: 320.0
+  cy: 240.0
 
-// 初始化ROS
-ros::NodeHandle nh;
-reconstructor.initROS(nh);
+extrinsics:
+  R_i_c: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+  t_i_c: [0.1, 0.0, 0.0]
+
+map:
+  voxel_size: 0.05
+  max_points_per_voxel: 100
+
+threading:
+  max_queue_size: 10
 ```
 
-### 步骤2：订阅话题
+### 步骤2：启动系统
 
 ```bash
-# RGB图像
-/camera/color/image_raw
+# 1. 启动Gazebo仿真（或真实无人机）
+roslaunch ...
 
-# 深度图像
-/camera/depth/image_raw
+# 2. 启动位姿广播节点（发布TF: map -> body）
+rosrun target_reconstruction get_local_pose.py iris 1
 
-# 目标检测框（需要自定义消息类型）
-/object_detection/bounding_box
+# 3. 启动YOLO目标检测（发布 /yolo/person_mask）
+rosrun ...
 
-# 相机位姿（来自SLAM或其他定位系统）
-/camera/pose
+# 4. 启动重建节点
+roslaunch target_reconstruction target_reconstruction.launch
+
+# 5. 可选：启动RViz查看点云
+roslaunch target_reconstruction target_reconstruction.launch use_rviz:=true
 ```
 
-### 步骤3：处理数据
+### 步骤3：订阅话题
 
-```cpp
-// 在回调函数中收集数据后
-reconstructor.processFrame(
-    rgb_img,      // cv::Mat
-    depth_img,    // cv::Mat
-    bbox,         // BoundingBox
-    camera_R,     // Eigen::Matrix3d
-    camera_t,     // Eigen::Vector3d
-    timestamp     // double
-);
+| 话题名称 | 消息类型 | 描述 | 频率 |
+|---------|---------|------|------|
+| `/camera/color/image_raw` | `sensor_msgs/Image` | RGB图像 | ~30Hz |
+| `/camera/depth/image_rect_raw` | `sensor_msgs/Image` | 深度图像 | ~30Hz |
+| `/yolo/person_mask` | `sensor_msgs/Image` | 分割mask | ~10Hz |
+| `/mavros/local_position/odom` | `nav_msgs/Odometry` | 位姿（body frame） | ~100Hz |
+
+### 步骤4：数据流转（自动）
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Node as target_reconstruction_node
+    participant Queue as FrameData Queue
+    participant Proc as Processing Thread
+    
+    User->>Node: roslaunch启动节点
+    Node->>Node: 初始化参数、发布器、订阅器
+    Node->>Proc: 启动处理线程
+    
+    loop 接收数据
+        Node->>Node: syncCallback: RGB+Depth+Odom同步
+        Node->>Queue: 数据预处理 & 入队
+        Queue->>Proc: notify处理线程
+        Proc->>Proc: 特征提取 & 3D重建
+        Proc->>User: 发布点云到RViz
+    end
 ```
 
-### 步骤4：保存模型
+### 步骤5：保存模型
 
 ```cpp
-// 优化地图（移除离群点）
-reconstructor.optimizeMap();
+// 1. 通过ROS服务调用（待实现）
+rosservice call /target_reconstruction/save_map "filename: 'model.ply'"
 
-// 保存为PLY格式
-reconstructor.saveReconstruction("target_model.ply");
+// 2. 或在代码中手动触发
+reconstructor_->saveReconstruction("target_model.ply");
 ```
 
 ## 📝 待实现功能清单

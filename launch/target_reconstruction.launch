@@ -1,8 +1,11 @@
 <?xml version="1.0"?>
 <launch>
-    <!-- ========== Configuration File ========== -->
-    <!-- Load parameters from YAML file -->
+    <!-- ========== Launch Arguments ========== -->
+    <!-- Configuration file path -->
     <arg name="config_file" default="$(find target_reconstruction)/config/default_params.yaml" />
+    
+    <!-- RViz visualization switch -->
+    <arg name="use_rviz" default="true" doc="Launch RViz for visualization" />
     
     <!-- ========== Target Reconstruction Node ========== -->
     <node name="target_reconstruction_node" pkg="target_reconstruction" type="target_reconstruction_node" output="screen">
@@ -32,8 +35,19 @@
         -->
     </node>
     
-    <!-- ========== Optional: RViz Visualization ========== -->
-    <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find target_reconstruction)/rviz/config.rviz" /> -->
+    <!-- ========== RViz Visualization ========== -->
+    <!-- Launch RViz with predefined configuration -->
+    <!-- Usage: 
+         - Launch with RViz (default): roslaunch target_reconstruction target_reconstruction.launch
+         - Launch without RViz: roslaunch target_reconstruction target_reconstruction.launch use_rviz:=false
+    -->
+    <node if="$(arg use_rviz)" 
+          name="rviz" 
+          pkg="rviz" 
+          type="rviz" 
+          args="-d $(find target_reconstruction)/rviz/default.rviz" 
+          output="screen"
+          respawn="false" />
     
 </launch>
 

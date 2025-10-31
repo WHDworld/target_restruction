@@ -709,9 +709,9 @@ V3D TargetReconstructor::pixelToWorld(const V2D& px, float depth,
     V3D pt_camera(x_norm * depth, y_norm * depth, depth);
     
     // 相机坐标系 -> 世界坐标系
-    // X_world = R_w_c * X_camera + t_w_c
-    // 其中 R_w_c = R_c_w^T, t_w_c = -R_c_w^T * t_c_w
-    V3D pt_world = R_c_w.transpose() * (pt_camera - t_c_w);
+    // X_world = R_c_w * X_camera + t_c_w
+    // 其中 R_c_w 是相机到世界的旋转矩阵，t_c_w 是相机在世界坐标系下的位置
+    V3D pt_world = R_c_w * pt_camera + t_c_w;
     
     return pt_world;
 }
@@ -719,7 +719,9 @@ V3D TargetReconstructor::pixelToWorld(const V2D& px, float depth,
 V2D TargetReconstructor::worldToPixel(const V3D& pos_w, const M3D& R_c_w, const V3D& t_c_w) const
 {
     // 世界坐标系 -> 相机坐标系
-    V3D pt_camera = R_c_w * pos_w + t_c_w;
+    // 已知：p_w = R_c_w * p_c + t_c_w（相机到世界）
+    // 求逆：p_c = R_c_w^T * (p_w - t_c_w)（世界到相机）
+    V3D pt_camera = R_c_w.transpose() * (pos_w - t_c_w);
     
     if (pt_camera.z() <= 0) {
         return V2D(-1, -1);  // 在相机后面

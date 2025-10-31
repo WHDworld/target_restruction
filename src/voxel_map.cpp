@@ -151,7 +151,9 @@ std::vector<VisualPoint*> VoxelMapManager::getPointsInBoundingBox(
             if (pt == nullptr || pt->is_outlier_) continue;
             
             // 世界坐标 -> 相机坐标
-            V3D pt_camera = camera_R * pt->pos_ + camera_t;
+            // 注意：传入的camera_R和camera_t是C->W变换，需要求逆
+            // 正确公式：p_cam = R_c_w^T * (p_world - t_c_w)
+            V3D pt_camera = camera_R.transpose() * (pt->pos_ - camera_t);
             
             // 深度检查
             if (pt_camera.z() <= 0.01) continue;
@@ -186,7 +188,8 @@ std::vector<VisualPoint*> VoxelMapManager::getPointsInFrustum(
             if (pt == nullptr || pt->is_outlier_) continue;
             
             // 世界坐标 -> 相机坐标
-            V3D pt_camera = camera_R * pt->pos_ + camera_t;
+            // 注意：传入的camera_R和camera_t是C->W变换，需要求逆
+            V3D pt_camera = camera_R.transpose() * (pt->pos_ - camera_t);
             
             // 深度范围检查
             if (pt_camera.z() < min_depth || pt_camera.z() > max_depth) continue;

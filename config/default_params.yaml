@@ -6,8 +6,12 @@
 image:
   width: 1280
   height: 1024
-  grid_size: 40           # Grid size for feature distribution (pixels)
+  grid_size: 1           # Grid size for feature competition (pixels), 控制最终点云密度
   border_pixels: 20       # Ignore border region (pixels)
+  
+  # 采样步长（控制遍历速度）
+  sampling_step_inside_mask: 1   # Step for pixels INSIDE mask (dense sampling)
+  sampling_step_outside_mask: 5  # Step for pixels OUTSIDE mask (sparse sampling)
 
 # ========== Depth Configuration ==========
 depth:

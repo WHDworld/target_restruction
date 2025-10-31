@@ -17,6 +17,7 @@
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
   <depend>message_filters</depend>
+  <depend>vikit_common</depend>
   
   <build_depend>message_generation</build_depend>
   <exec_depend>message_runtime</exec_depend>

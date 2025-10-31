@@ -17,6 +17,7 @@ find_package(catkin REQUIRED COMPONENTS
   image_transport
   message_filters
   message_generation
+  vikit_common
 )
 
 ## Find system dependencies
@@ -42,7 +43,7 @@ generate_messages(
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES target_reconstruction
-  CATKIN_DEPENDS roscpp std_msgs sensor_msgs geometry_msgs cv_bridge message_filters message_runtime
+  CATKIN_DEPENDS roscpp std_msgs sensor_msgs geometry_msgs cv_bridge message_filters message_runtime vikit_common
   DEPENDS OpenCV Eigen3
 )
 

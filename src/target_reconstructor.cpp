@@ -8,6 +8,7 @@
 #include <sensor_msgs/point_cloud2_iterator.h>
 #include <std_msgs/Header.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <vikit/vision.h>
 #include <cmath>
 #include <algorithm>
 
@@ -247,7 +248,6 @@ void TargetReconstructor::generateVisualPoints(
         // 创建首次观测Feature
         Feature* ftr = new Feature(pt, patch, px, f, camera_R, camera_t, depth, 0);
         ftr->id_ = frame_count_;
-        ftr->img_ = gray_img.clone();  // 保存图像用于后续Warping
         
         // 添加观测
         pt->addObservation(ftr);
@@ -273,16 +273,17 @@ void TargetReconstructor::generateVisualPointsWithMask(
     last_frame_points_.clear();
     last_frame_colors_.clear();
     
-    // 转换为灰度图
+    // 转换为灰度图（vk::shiTomasiScore 和 extractImagePatch 都需要单通道图像）
     Mat gray_img;
     if (rgb_img.channels() == 3) {
         cv::cvtColor(rgb_img, gray_img, cv::COLOR_BGR2GRAY);
     } else {
         gray_img = rgb_img.clone();
     }
-    
+
+    resetGrid();
     // 提取候选点
-    auto candidates = extractCandidatePoints(gray_img, depth_img, bbox);
+    auto candidates = extractCandidatePoints(gray_img, depth_img, mask, bbox);
     
     if (candidates.empty()) {
         ROS_WARN("  No candidate points found");
@@ -290,18 +291,10 @@ void TargetReconstructor::generateVisualPointsWithMask(
     }
     
     int created_count = 0;
-    int filtered_by_mask = 0;
     
     for (const auto& px : candidates) {
         int x = static_cast<int>(px.x());
         int y = static_cast<int>(px.y());
-        
-        // **关键：使用 mask 过滤**
-        if (x < 0 || x >= mask.cols || y < 0 || y >= mask.rows) continue;
-        if (mask.at<uint8_t>(y, x) < 128) {  // 不在目标区域内
-            filtered_by_mask++;
-            continue;
-        }
         
         // 获取深度（假设depth_img是float类型，单位：米）
         float depth = depth_img.at<float>(y, x);
@@ -327,7 +320,7 @@ void TargetReconstructor::generateVisualPointsWithMask(
         last_frame_points_.push_back(pt_camera);
         last_frame_colors_.push_back(color);
         
-        // 提取图像Patch
+        // 提取图像Patch（必须使用灰度图）
         float patch[PATCH_SIZE_TOTAL];
         extractImagePatch(gray_img, px, patch);
         
@@ -345,8 +338,7 @@ void TargetReconstructor::generateVisualPointsWithMask(
         // 创建首次观测Feature
         Feature* ftr = new Feature(pt, patch, px, f, camera_R, camera_t, depth, 0);
         ftr->id_ = frame_count_;
-        ftr->img_ = gray_img.clone();  // 保存图像用于后续Warping
-        
+
         // 添加观测
         pt->addObservation(ftr);
         
@@ -356,8 +348,8 @@ void TargetReconstructor::generateVisualPointsWithMask(
     }
     
     total_points_created_ += created_count;
-    ROS_INFO("  Created %d new visual points (%d filtered by mask)", 
-             created_count, filtered_by_mask);
+    ROS_INFO("  Created %d new visual points", 
+             created_count);
 }
 
 std::vector<VisualPoint*> TargetReconstructor::retrieveVisiblePoints(
@@ -404,7 +396,8 @@ void TargetReconstructor::updateVisualPoints(
         
         V3D pos_new = pixelToWorld(px, depth, camera_R, camera_t);
         
-        if (!pt->checkGeometricConsistency(pos_new, 0.1)) {
+        // 放宽几何一致性阈值（从0.1m增加到0.5m）
+        if (!pt->checkGeometricConsistency(pos_new, 0.5)) {
             // 几何不一致，可能是遮挡或误匹配
             continue;
         }
@@ -426,7 +419,8 @@ void TargetReconstructor::updateVisualPoints(
             double delta_pixel = (px - last_ftr->px_).norm();
             
             // 位姿变化超过阈值或像素位置变化较大
-            if (delta_pos > 0.3 || delta_pixel > 30) {
+            // 降低阈值以增加观测更新频率
+            if (delta_pos > 0.05 || delta_pixel > 5) {  // 5cm 或 5像素
                 add_flag = true;
             }
         }
@@ -443,7 +437,7 @@ void TargetReconstructor::updateVisualPoints(
             // 创建新观测
             Feature* ftr = new Feature(pt, patch, px, f, camera_R, camera_t, depth, 0);
             ftr->id_ = frame_count_;
-            ftr->img_ = gray_img.clone();
+            // ftr->img_ = gray_img.clone();  // ❌ 内存杀手
             
             // 添加观测
             pt->addObservation(ftr);
@@ -486,37 +480,50 @@ void TargetReconstructor::updateVisualPointsWithMask(
     }
     
     int updated_count = 0;
-    int filtered_by_mask = 0;
+    
+    // 诊断计数器
+    int count_outlier = 0;
+    int count_out_of_image = 0;
+    int count_invalid_depth = 0;
+    int count_geometry_fail = 0;
+    int count_no_change = 0;
+    
+    // 详细诊断统计
+    double sum_delta_pos = 0.0, sum_delta_pixel = 0.0;
+    double max_delta_pos = 0.0, max_delta_pixel = 0.0;
+    int count_has_obs = 0;
     
     for (auto pt : visible_points) {
-        if (pt == nullptr || pt->is_outlier_) continue;
+        if (pt == nullptr || pt->is_outlier_) {
+            count_outlier++;
+            continue;
+        }
         
         // 投影到当前帧
         V2D px = worldToPixel(pt->pos_, camera_R, camera_t);
         
-        // 检查是否在图像范围内
         int x = static_cast<int>(px.x());
         int y = static_cast<int>(px.y());
         
-        if (!isInImage(x, y)) continue;
-        
-        // **关键：使用 mask 过滤**
-        if (x >= 0 && x < mask.cols && y >= 0 && y < mask.rows) {
-            if (mask.at<uint8_t>(y, x) < 128) {  // 不在目标区域内
-                filtered_by_mask++;
-                continue;
-            }
+        // 检查像素是否在图像范围内
+        if (!isInImage(x, y)) {
+            count_out_of_image++;
+            continue;
         }
         
         // 获取深度并进行几何一致性检查
         float depth = current_depth_.at<float>(y, x);
         
-        if (!isDepthValid(depth)) continue;
+        if (!isDepthValid(depth)) {
+            count_invalid_depth++;
+            continue;
+        }
         
         V3D pos_new = pixelToWorld(px, depth, camera_R, camera_t);
         
-        if (!pt->checkGeometricConsistency(pos_new, 0.1)) {
-            // 几何不一致，可能是遮挡或误匹配
+        // 进一步放宽几何一致性阈值（从0.5m增加到1.5m以应对深度噪声）
+        if (!pt->checkGeometricConsistency(pos_new, 1.5)) {
+            count_geometry_fail++;
             continue;
         }
         
@@ -526,6 +533,8 @@ void TargetReconstructor::updateVisualPointsWithMask(
         if (pt->obs_.empty()) {
             add_flag = true;
         } else {
+            count_has_obs++;
+            
             // 检查与最后一次观测的差异
             Feature* last_ftr = pt->obs_.back();
             
@@ -536,9 +545,22 @@ void TargetReconstructor::updateVisualPointsWithMask(
             double delta_pos = (current_cam_pos - last_cam_pos).norm();
             double delta_pixel = (px - last_ftr->px_).norm();
             
-            // 位姿变化超过阈值或像素位置变化较大
-            if (delta_pos > 0.3 || delta_pixel > 30) {
+            // 统计
+            sum_delta_pos += delta_pos;
+            sum_delta_pixel += delta_pixel;
+            max_delta_pos = std::max(max_delta_pos, delta_pos);
+            max_delta_pixel = std::max(max_delta_pixel, delta_pixel);
+            
+            // 大幅放宽阈值，并改用OR逻辑（任一满足即更新）
+            // 同时增加基于观测数量的强制更新策略
+            bool pose_changed = (delta_pos > 0.01);  // 1cm
+            bool pixel_changed = (delta_pixel > 1.0); // 1像素
+            bool force_update = (pt->obs_.size() < 3); // 前3帧强制更新
+            
+            if (pose_changed || pixel_changed || force_update) {
                 add_flag = true;
+            } else {
+                count_no_change++;
             }
         }
         
@@ -554,7 +576,7 @@ void TargetReconstructor::updateVisualPointsWithMask(
             // 创建新观测
             Feature* ftr = new Feature(pt, patch, px, f, camera_R, camera_t, depth, 0);
             ftr->id_ = frame_count_;
-            ftr->img_ = gray_img.clone();
+            // ftr->img_ = gray_img.clone();  // ❌ 内存杀手
             
             // 添加观测
             pt->addObservation(ftr);
@@ -578,8 +600,16 @@ void TargetReconstructor::updateVisualPointsWithMask(
         }
     }
     
-    ROS_INFO("  Updated %d visual points with new observations (%d filtered by mask)", 
-             updated_count, filtered_by_mask);
+    ROS_INFO("  Updated %d visual points with new observations", updated_count);
+    ROS_INFO("  [Diagnostics] Outlier:%d OutOfImage:%d InvalidDepth:%d GeometryFail:%d NoChange:%d",
+             count_outlier, count_out_of_image, count_invalid_depth, count_geometry_fail, count_no_change);
+    
+    if (count_has_obs > 0) {
+        double avg_delta_pos = sum_delta_pos / count_has_obs;
+        double avg_delta_pixel = sum_delta_pixel / count_has_obs;
+        ROS_INFO("  [Motion Stats] Avg: pos=%.4fm pixel=%.2fpx | Max: pos=%.4fm pixel=%.2fpx",
+                 avg_delta_pos, avg_delta_pixel, max_delta_pos, max_delta_pixel);
+    }
 }
 
 std::vector<V2D> TargetReconstructor::extractCandidatePoints(
@@ -587,10 +617,9 @@ std::vector<V2D> TargetReconstructor::extractCandidatePoints(
     const Mat& depth_img,
     const BoundingBox& bbox)
 {
-    resetGrid();
     
     // 遍历检测框内的像素（跳步采样以提高效率）
-    int step = 2;
+    int step = 1;
     
     for (int y = bbox.y_min; y <= bbox.y_max; y += step) {
         for (int x = bbox.x_min; x <= bbox.x_max; x += step) {
@@ -601,7 +630,7 @@ std::vector<V2D> TargetReconstructor::extractCandidatePoints(
             if (!isDepthValid(depth)) continue;
             
             // 计算Shi-Tomasi角点响应
-            float score = computeShiTomasiScore(gray_img, x, y);
+            float score = vk::shiTomasiScore(gray_img, x, y);
             
             if (score < config_.min_shi_tomasi_score) continue;
             
@@ -633,47 +662,55 @@ std::vector<V2D> TargetReconstructor::extractCandidatePoints(
     return candidates;
 }
 
-float TargetReconstructor::computeShiTomasiScore(const Mat& img, int x, int y)
+std::vector<V2D> TargetReconstructor::extractCandidatePoints(
+    const Mat& gray_img,
+    const Mat& depth_img,
+    const Mat& mask,
+    const BoundingBox& bbox)
 {
-    const int patch_size = 2;
+    resetGrid();
     
-    // 边界检查
-    if (x < patch_size || x >= img.cols - patch_size ||
-        y < patch_size || y >= img.rows - patch_size) {
-        return 0.0f;
-    }
-    
-    // 计算图像梯度的自相关矩阵
-    float dx2 = 0.0f;  // Ix^2
-    float dy2 = 0.0f;  // Iy^2
-    float dxy = 0.0f;  // Ix*Iy
-    
-    for (int v = -patch_size; v <= patch_size; ++v) {
-        for (int u = -patch_size; u <= patch_size; ++u) {
-            // 使用Sobel算子计算梯度
-            float Ix = (img.at<uchar>(y + v, x + u + 1) - 
-                       img.at<uchar>(y + v, x + u - 1)) / 2.0f;
-            float Iy = (img.at<uchar>(y + v + 1, x + u) - 
-                       img.at<uchar>(y + v - 1, x + u)) / 2.0f;
+    // 遍历检测框内的像素（根据mask自适应采样）
+    // 对mask内（目标区域）使用密集采样，mask外使用稀疏采样
+    for (int y = bbox.y_min; y <= bbox.y_max; y++) {
+        for (int x = bbox.x_min; x <= bbox.x_max; x++) {
+            if (!isInImage(x, y) || mask.at<uchar>(y, x) <= 128) continue;
             
-            dx2 += Ix * Ix;
-            dy2 += Iy * Iy;
-            dxy += Ix * Iy;
+            // 检查深度
+            float depth = depth_img.at<float>(y, x);
+            if (!isDepthValid(depth)) continue;
+            
+            // 计算Shi-Tomasi角点响应
+            float score = vk::shiTomasiScore(gray_img, x, y);
+            
+            if (score < config_.min_shi_tomasi_score) continue;
+            
+            // 网格索引
+            int grid_x = x / config_.grid_size;
+            int grid_y = y / config_.grid_size;
+            int grid_idx = grid_y * grid_n_width_ + grid_x;
+            
+            if (grid_idx < 0 || grid_idx >= grid_scores_.size()) continue;
+            
+            // 在网格内竞争：保留响应最大的点
+            if (score > grid_scores_[grid_idx]) {
+                grid_scores_[grid_idx] = score;
+                grid_candidates_[grid_idx] = V2D(x, y);
+            }
         }
     }
     
-    // 计算Shi-Tomasi得分（矩阵的较小特征值）
-    float trace = dx2 + dy2;
-    float det = dx2 * dy2 - dxy * dxy;
+    // 收集选中的候选点
+    std::vector<V2D> candidates;
+    candidates.reserve(grid_scores_.size());
     
-    // 较小特征值 = (trace - sqrt(trace^2 - 4*det)) / 2
-    float discriminant = trace * trace - 4.0f * det;
+    for (const auto& px : grid_candidates_) {
+        if (px.x() >= 0 && px.y() >= 0) {  // 有效点
+            candidates.push_back(px);
+        }
+    }
     
-    if (discriminant < 0) return 0.0f;
-    
-    float score = (trace - std::sqrt(discriminant)) / 2.0f;
-    
-    return score;
+    return candidates;
 }
 
 void TargetReconstructor::extractImagePatch(const Mat& img, const V2D& px, float* patch)
@@ -819,3 +856,51 @@ void TargetReconstructor::poseCallback(const geometry_msgs::PoseStampedConstPtr&
     // 将在完整集成时实现
 }
 
+void TargetReconstructor::retrieveFromVisualSparseMap(cv::Mat img, cv::Mat depth_img, std::vector<V2D> &candidates)
+{
+    if(depth_img.empty() || img.empty()) return;
+
+    // double ts0 = omp_get_wtime();
+
+    sub_feat_map.clear();
+    float voxel_size = 0.1;
+
+    int loc_xyz[3];
+
+    for(int i = 0; i < candidates.size(); i++) 
+    {
+        V2D px = candidates[i];
+        V3D pt_w = pixelToWorld(px, depth_img.at<float>(px.y(), px.x()), current_R_, current_t_);
+        for(int j = 0; j < 3; j++)
+        {
+            loc_xyz[j] = floor(pt_w[j] / voxel_size);
+            if(loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+        }
+        VOXEL_LOCATION position(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
+
+        auto iter = sub_feat_map.find(position);
+        if(iter == sub_feat_map.end()) { sub_feat_map[position] = 0; }
+        else { iter->second = 0; }
+    }
+
+    for(auto &iter : sub_feat_map)
+    {
+        VOXEL_LOCATION position = iter.first;
+
+        std::vector<VisualPoint*> corre_voxel = map_manager_->getPointsInVoxel(position);
+        if(!corre_voxel.empty())
+        {
+            int voxel_num = corre_voxel.size();
+
+            for(int i = 0; i < voxel_num; i++)
+            {
+                VisualPoint *pt = corre_voxel[i];
+                if(pt == nullptr || pt->obs_.size() == 0) continue;
+
+            }
+            
+        }
+
+
+    }
+}

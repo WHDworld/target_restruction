@@ -65,6 +65,8 @@ public:
         nh_private_.param("image/width", config.image_width, 640);
         nh_private_.param("image/height", config.image_height, 480);
         nh_private_.param("image/grid_size", config.grid_size, 40);
+        nh_private_.param("image/sampling_step_inside_mask", config.sampling_step_inside_mask, 1);
+        nh_private_.param("image/sampling_step_outside_mask", config.sampling_step_outside_mask, 5);
         
         // 深度配置
         nh_private_.param("depth/min_depth", config.min_depth, 0.1);

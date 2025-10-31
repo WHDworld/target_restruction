@@ -25,8 +25,10 @@ struct ReconstructionConfig
     // 图像处理
     int image_width;
     int image_height;
-    int grid_size;                  // 网格划分大小（像素）
+    int grid_size;                  // 网格划分大小（像素）- 控制最终点云密度
     int border_pixels;              // 图像边界（像素）
+    int sampling_step_inside_mask;  // mask内的采样步长（密集）
+    int sampling_step_outside_mask; // mask外的采样步长（稀疏）
     
     // 深度过滤
     double min_depth;               // 最小深度（米）
@@ -49,12 +51,21 @@ struct ReconstructionConfig
     
     ReconstructionConfig() 
         : image_width(640), image_height(480), grid_size(40), border_pixels(20),
+          sampling_step_inside_mask(1), sampling_step_outside_mask(5),
           min_depth(0.1), max_depth(5.0), depth_noise_threshold(0.05),
           min_shi_tomasi_score(5.0), max_points_per_grid(1),
           min_observations(3), max_reprojection_error(2.0), min_confidence(0.3),
           voxel_size(VOXEL_SIZE), enable_color(true), enable_tsdf(false) {}
 };
 
+struct MaskedPoint
+{
+    V2D pixel;
+    V3D pose_world;
+    V3D pose_bady;
+    V3D color;
+    float depth;
+};
 /**
  * @brief 目标重建器主类
  * 
@@ -176,12 +187,11 @@ public:
         const Mat& gray_img,
         const Mat& depth_img,
         const BoundingBox& bbox);
-    
-    /**
-     * @brief 计算Shi-Tomasi角点响应
-     */
-    float computeShiTomasiScore(const Mat& img, int x, int y);
-    
+    std::vector<V2D> extractCandidatePoints(
+        const Mat& gray_img,
+        const Mat& depth_img,
+        const Mat& mask,
+        const BoundingBox& bbox);    
     /**
      * @brief 提取图像Patch
      */
@@ -238,6 +248,7 @@ public:
         colors = last_frame_colors_;
     }
     
+    void retrieveFromVisualSparseMap(cv::Mat img, cv::Mat depth_img, std::vector<V2D> &candidates);
 private:
     // ========== 配置参数 ==========
     ReconstructionConfig config_;
@@ -274,6 +285,10 @@ private:
      */
     void resetGrid();
     
+    std::vector<int> grid_num;
+    std::vector<int> map_index;
+    std::unordered_map<VOXEL_LOCATION, int> sub_feat_map;
+
     /**
      * @brief 检查深度是否有效
      */

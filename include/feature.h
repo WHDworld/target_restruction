@@ -27,45 +27,45 @@ class Feature : boost::noncopyable
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    // ========== 基本信息 ==========
-    int id_;                        // Feature唯一ID（帧序号）
-    VisualPoint* point_;            // 所属的3D视觉点
-    
-    // ========== 图像信息 ==========
-    V2D px_;                        // 像素坐标
-    V3D f_;                         // 归一化平面坐标（bearing vector）
-    float patch_[PATCH_SIZE_TOTAL]; // 图像Patch（灰度值）
-    Mat img_;                       // 所属图像（用于Warping，可选存储）
-    int level_;                     // 金字塔层级
-    
-    // ========== 几何信息 ==========
-    M3D T_c_w_rotation_;            // 相机到世界的旋转（来自外部位姿）
-    V3D T_c_w_translation_;         // 相机到世界的平移
-    float depth_;                   // 深度值（来自深度图）
-    bool depth_valid_;              // 深度是否有效
+  enum FeatureType
+  {
+    CORNER,
+    EDGELET
+  };
+  int id_;
+  FeatureType type_;     //!< Type can be corner or edgelet.
+  cv::Mat img_;          //!< Image associated with the patch feature
+  Vector2d px_;          // 像素坐标
+  Vector3d f_;           //!< Unit-bearing vector of the patch feature.
+  int level_;            //!< Image pyramid level where patch feature was extracted.
+  VisualPoint *point_;   // 关联的3D点
+  Vector2d grad_;        //!< Dominant gradient direction for edglets, normalized.
+  SE3 T_f_w_;            // 观测时的位姿
+  float *patch_;         // 图像patch (9x9像素)
+  float score_;          //!< Score of the patch feature.
+  float mean_;           //!< Mean intensity of the image patch feature, used for normalization.
+  double inv_expo_time_; // 逆曝光时间
     
     // ========== 构造函数 ==========
-    Feature(VisualPoint* point, const float* patch, const V2D& px, 
-            const V3D& f, int level = 0);
-    
-    Feature(VisualPoint* point, const float* patch, const V2D& px, 
-            const V3D& f, const M3D& R_c_w, const V3D& t_c_w, 
-            float depth, int level = 0);
-    
-    ~Feature();
+    Feature(VisualPoint* point, float* patch, const V2D& px, 
+            const V3D& f, const SE3& _T_f_w, int level = 0) :
+            id_(-1), px_(px), f_(f), level_(level), point_(point),
+            T_f_w_(_T_f_w), patch_(patch), score_(0.0), mean_(0.0)
+        {
+
+        }
+    ~Feature()
+    {
+        delete[] patch_;
+    }
     
     // ========== 辅助函数 ==========
     /**
      * @brief 获取Feature在世界坐标系中的位置
      * @return 3D世界坐标（如果深度有效）
      */
-    V3D pos() const;
+    V3D pos() const {return T_f_w_.inverse().translation();};
     
-    /**
-     * @brief 检查深度是否有效
-     */
-    bool hasValidDepth() const { return depth_valid_ && depth_ > 0.0f; }
-
 };
 
 #endif // TARGET_RECON_FEATURE_H_

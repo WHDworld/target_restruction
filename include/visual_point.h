@@ -50,11 +50,8 @@ public:
     float confidence_;              // 置信度评分 [0, 1]
     int num_observations_;          // 观测次数
     float avg_photometric_error_;   // 平均光度误差
-    
-    // ========== TSDF信息（可选）==========
-    float tsdf_value_;              // TSDF距离值
-    float tsdf_weight_;             // TSDF权重（融合次数）
-    
+        
+    Vector3d previous_normal_;    //!< Last updated normal vector.
     // ========== 构造与析构 ==========
     VisualPoint(const V3D& pos);
     VisualPoint(const V3D& pos, const V3D& color);
@@ -119,6 +116,9 @@ public:
      * @brief 计算重投影误差
      */
     double computeReprojectionError(const Feature* ftr) const;
+    void deleteNonRefPatchFeatures();
+    void findMinScoreFeature(const Vector3d &framepos, Feature *&ftr) const;
+
 };
 
 #endif // TARGET_RECON_VISUAL_POINT_H_

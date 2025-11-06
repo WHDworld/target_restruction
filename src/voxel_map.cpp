@@ -32,28 +32,33 @@ VOXEL_LOCATION VoxelMapManager::getVoxelLocation(const V3D& pos) const
 void VoxelMapManager::insertPoint(VisualPoint* point)
 {
     if (point == nullptr) return;
+    Eigen::Vector3d pt_w(point->pos_.x(), point->pos_.y(), point->pos_.z());
+    double voxel_size = 0.1;
+    float loc_xyz[3];
+    for (int j = 0; j < 3; j++) {
+        loc_xyz[j] = pt_w[j] / voxel_size;
+        if (loc_xyz[j] < 0) loc_xyz[j] -= 1.0;
+    }
+
+    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
     
-    VOXEL_LOCATION voxel_loc = getVoxelLocation(point->pos_);
-    
-    auto iter = voxel_map_.find(voxel_loc);
-    if (iter != voxel_map_.end()) {
+    auto iter = voxel_map_.find(position);
+    if (iter != voxel_map_.end()) 
+    {
         // 体素已存在，直接添加点
         iter->second->visual_points.push_back(point);
         iter->second->count++;
-    } else {
+    } 
+    else 
+    {
         // 创建新体素
-        VOXEL_POINTS* voxel = new VOXEL_POINTS(1);
+        VOXEL_POINTS* voxel = new VOXEL_POINTS(0);
         voxel->visual_points.push_back(point);
-        
-        // 计算体素中心
-        voxel->center_ = V3D(
-            voxel_loc.x * voxel_size_ + voxel_size_ / 2.0,
-            voxel_loc.y * voxel_size_ + voxel_size_ / 2.0,
-            voxel_loc.z * voxel_size_ + voxel_size_ / 2.0
-        );
-        
-        voxel_map_[voxel_loc] = voxel;
+        voxel_map_[position] = voxel;
     }
+    static int insert_count = 0;
+    insert_count++;
+    printf("[ Voxel Map Manager ] Inserted %d points into voxel map\n", insert_count);
 }
 
 void VoxelMapManager::insertPoints(const std::vector<VisualPoint*>& points)

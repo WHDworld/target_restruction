@@ -7,7 +7,10 @@ image:
   width: 1280
   height: 1024
   grid_size: 1           # Grid size for feature competition (pixels), 控制最终点云密度
-  border_pixels: 20       # Ignore border region (pixels)
+  border_pixels: 20       # Ignore border region (pixels) - 简单边界检查
+  border: 40              # Safe border for patch extraction (pixels), 防止patch提取越界
+                          # 参考 FAST-LIVO2: border = (patch_size/2 + 1) * 2^patch_pyrimid_level
+                          # 例如: patch_size=9, level=3 -> border = (4+1)*8 = 40 pixels
   
   # 采样步长（控制遍历速度）
   sampling_step_inside_mask: 1   # Step for pixels INSIDE mask (dense sampling)

@@ -23,6 +23,7 @@ find_package(catkin REQUIRED COMPONENTS
 ## Find system dependencies
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(Sophus REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system thread)
 
 ## Generate messages
@@ -57,6 +58,7 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
+  ${Sophus_INCLUDE_DIRS}
   ${Boost_INCLUDE_DIRS}
 )
 
@@ -75,6 +77,7 @@ add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EX
 target_link_libraries(${PROJECT_NAME}
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
+  /usr/local/lib/libSophus.so
   ${Boost_LIBRARIES}
 )
 
@@ -89,6 +92,7 @@ target_link_libraries(target_reconstruction_node
   ${PROJECT_NAME}
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
+  /usr/local/lib/libSophus.so
   ${Boost_LIBRARIES}
 )
 

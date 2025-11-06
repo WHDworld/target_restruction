@@ -44,6 +44,111 @@ namespace std {
 }
 
 /**
+ * @brief 体素平面结构（从 FAST-LIVO2 移植）
+ * 用于存储平面拟合的结果
+ */
+typedef struct VoxelPlane
+{
+  Eigen::Vector3d center_;                    // 平面中心
+  Eigen::Vector3d normal_;                    // 平面法向量
+  Eigen::Vector3d y_normal_;                  // Y 方向法向量
+  Eigen::Vector3d x_normal_;                  // X 方向法向量
+  Eigen::Matrix3d covariance_;                // 协方差矩阵
+  Eigen::Matrix<double, 6, 6> plane_var_;     // 平面参数方差
+  float radius_ = 0;                          // 平面半径
+  float min_eigen_value_ = 1;                 // 最小特征值
+  float mid_eigen_value_ = 1;                 // 中间特征值
+  float max_eigen_value_ = 1;                 // 最大特征值
+  float d_ = 0;                               // 平面方程系数 d
+  int points_size_ = 0;                       // 点的数量
+  bool is_plane_ = false;                     // 是否为平面
+  bool is_init_ = false;                      // 是否初始化
+  int id_ = 0;                                // ID
+  bool is_update_ = false;                    // 是否更新
+  
+  VoxelPlane()
+  {
+    plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
+    covariance_ = Eigen::Matrix3d::Zero();
+    center_ = Eigen::Vector3d::Zero();
+    normal_ = Eigen::Vector3d::Zero();
+  }
+} VoxelPlane;
+
+/**
+ * @brief 体素八叉树节点（从 FAST-LIVO2 移植）
+ * 用于存储点云和平面信息
+ */
+class VoxelOctoTree
+{
+public:
+  VoxelOctoTree() = default;
+  
+  std::vector<pointWithVar> temp_points_;     // 临时点云
+  VoxelPlane *plane_ptr_;                     // 平面指针
+  int layer_;                                 // 层级
+  int octo_state_;                            // 状态：0=叶节点，1=非叶节点
+  VoxelOctoTree *leaves_[8];                  // 8个子节点
+  double voxel_center_[3];                    // 体素中心 (x, y, z)
+  std::vector<int> layer_init_num_;           // 每层初始化数量
+  float quater_length_;                       // 四分之一长度
+  float planer_threshold_;                    // 平面阈值
+  int points_size_threshold_;                 // 点数阈值
+  int update_size_threshold_;                 // 更新阈值
+  int max_points_num_;                        // 最大点数
+  int max_layer_;                             // 最大层级
+  int new_points_;                            // 新点数
+  bool init_octo_;                            // 是否初始化
+  bool update_enable_;                        // 是否允许更新
+
+  VoxelOctoTree(int max_layer, int layer, int points_size_threshold, int max_points_num, float planer_threshold)
+      : max_layer_(max_layer), layer_(layer), points_size_threshold_(points_size_threshold), 
+        max_points_num_(max_points_num), planer_threshold_(planer_threshold)
+  {
+    temp_points_.clear();
+    octo_state_ = 0;
+    new_points_ = 0;
+    update_size_threshold_ = 5;
+    init_octo_ = false;
+    update_enable_ = true;
+    for (int i = 0; i < 8; i++)
+    {
+      leaves_[i] = nullptr;
+    }
+    plane_ptr_ = new VoxelPlane;
+  }
+
+  ~VoxelOctoTree()
+  {
+    for (int i = 0; i < 8; i++)
+    {
+      delete leaves_[i];
+    }
+    delete plane_ptr_;
+  }
+  
+  // 查找对应的体素节点
+  VoxelOctoTree *find_correspond(Eigen::Vector3d pw)
+  {
+    // 简化实现：返回当前节点
+    if (octo_state_ == 0) return this;
+    
+    // 判断点在哪个子节点
+    int xyz[3] = {0, 0, 0};
+    if (pw[0] > voxel_center_[0]) xyz[0] = 1;
+    if (pw[1] > voxel_center_[1]) xyz[1] = 1;
+    if (pw[2] > voxel_center_[2]) xyz[2] = 1;
+    int leafnum = 4 * xyz[0] + 2 * xyz[1] + xyz[2];
+    
+    if (leaves_[leafnum] != nullptr)
+    {
+      return leaves_[leafnum]->find_correspond(pw);
+    }
+    return this;
+  }
+};
+
+/**
  * @brief 单个体素存储的视觉点集合
  */
 struct VOXEL_POINTS
@@ -236,9 +341,10 @@ public:
         std::vector<V3D>* colors = nullptr,
         std::vector<V3D>* normals = nullptr) const;
     
+    std::unordered_map<VOXEL_LOCATION, VOXEL_POINTS*> voxel_map_;  // 主地图
+
 private:
     // ========== 内部数据结构 ==========
-    std::unordered_map<VOXEL_LOCATION, VOXEL_POINTS*> voxel_map_;  // 主地图
     double voxel_size_;                                             // 体素大小
     
     // ========== 相机内参 ==========

@@ -22,39 +22,14 @@
 #include <thread>
 #include <deque>
 #include <condition_variable>
-#include "target_reconstructor.h"
-
-// ========== 数据帧结构 ==========
-struct FrameData
-{
-    // 时间戳
-    double timestamp;
-    
-    // 图像数据
-    cv::Mat rgb_img;
-    cv::Mat depth_img;
-    cv::Mat mask;  // 可能为空
-    
-    // 位姿数据
-    Eigen::Matrix3d camera_R;      // 相机姿态（世界到相机）
-    Eigen::Vector3d camera_t;      // 相机位置（世界系）
-    Eigen::Matrix3d R_w_i;         // 机体姿态（世界到机体）
-    Eigen::Vector3d t_w_i;         // 机体位置（世界系）
-    
-    // 包围框（从mask计算得到）
-    BoundingBox bbox;
-    
-    // 标志
-    bool has_valid_mask;
-    
-    FrameData() : timestamp(0.0), has_valid_mask(false) {}
-};
+#include <vikit/pinhole_camera.h>  // 相机模型
+#include "target_reconstructor.h"  // 包含 frame.h
 
 class TargetReconstructionNode
 {
 public:
     TargetReconstructionNode(ros::NodeHandle& nh, ros::NodeHandle& nh_private)
-        : nh_(nh), nh_private_(nh_private), reconstructor_(nullptr), 
+        : nh_(nh), nh_private_(nh_private), reconstructor_(nullptr), cam_(nullptr),
           got_first_data_(false), got_first_mask_(false), 
           processing_thread_running_(true), max_queue_size_(10)
     {
@@ -65,6 +40,7 @@ public:
         nh_private_.param("image/width", config.image_width, 640);
         nh_private_.param("image/height", config.image_height, 480);
         nh_private_.param("image/grid_size", config.grid_size, 40);
+        nh_private_.param("image/border", config.border, 40);
         nh_private_.param("image/sampling_step_inside_mask", config.sampling_step_inside_mask, 1);
         nh_private_.param("image/sampling_step_outside_mask", config.sampling_step_outside_mask, 5);
         
@@ -140,6 +116,7 @@ public:
         ROS_INFO("Configuration:");
         ROS_INFO("  - Image Size: %d x %d", config.image_width, config.image_height);
         ROS_INFO("  - Grid Size: %d pixels", config.grid_size);
+        ROS_INFO("  - Border: %d pixels", config.border);
         ROS_INFO("  - Voxel Size: %.3f m", config.voxel_size);
         ROS_INFO("  - Depth Range: [%.2f, %.2f] m", config.min_depth, config.max_depth);
         ROS_INFO("  - Min Observations: %d", config.min_observations);
@@ -148,6 +125,15 @@ public:
         // 创建重建器
         reconstructor_ = new TargetReconstructor(config);
         reconstructor_->initROS(nh_);
+        
+        // 创建相机模型（使用重建器中的相机内参）
+        // PinholeCamera(width, height, scale, fx, fy, cx, cy, d0, d1, d2, d3, d4)
+        cam_ = new vk::PinholeCamera(config.image_width, config.image_height, 1.0,
+                                     reconstructor_->fx_, reconstructor_->fy_,
+                                     reconstructor_->cx_, reconstructor_->cy_);
+        ROS_INFO("Camera model initialized: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+                 reconstructor_->fx_, reconstructor_->fy_, 
+                 reconstructor_->cx_, reconstructor_->cy_);
         
         // 从参数服务器读取话题名称
         std::string rgb_topic, depth_topic, mask_topic, odom_topic;
@@ -244,6 +230,11 @@ public:
             
             delete reconstructor_;
         }
+        
+        // 删除相机模型
+        if (cam_ != nullptr) {
+            delete cam_;
+        }
     }
     
 private:
@@ -274,108 +265,140 @@ private:
         
         frame_count_received_++;
         
-        try {
-            // 创建帧数据结构
-            FrameData frame;
-            frame.timestamp = rgb_msg->header.stamp.toSec();
-            // 1. 转换RGB图像
+        // 创建帧数据结构（使用智能指针，传入相机模型）
+        FrameDataPtr frame = std::make_shared<FrameData>(cam_);
+        frame->timestamp = rgb_msg->header.stamp.toSec();
+        
+        // 1. 转换RGB图像
             cv_bridge::CvImagePtr rgb_ptr = cv_bridge::toCvCopy(rgb_msg, sensor_msgs::image_encodings::BGR8);
-            frame.rgb_img = rgb_ptr->image.clone();  // 深拷贝
-            
-            // 2. 转换深度图像
-            if (depth_msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
-                cv_bridge::CvImagePtr depth_ptr = cv_bridge::toCvCopy(depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
-                frame.depth_img = depth_ptr->image.clone();  // 深拷贝
-            } else if (depth_msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
-                cv_bridge::CvImagePtr depth_ptr = cv_bridge::toCvCopy(depth_msg, sensor_msgs::image_encodings::TYPE_16UC1);
-                depth_ptr->image.convertTo(frame.depth_img, CV_32FC1, 0.001);
-            } else {
-                ROS_WARN_THROTTLE(5.0, "Unsupported depth image encoding: %s", depth_msg->encoding.c_str());
-                return;
-            }
-            
-            // 3. 获取最新的 mask（如果有的话）
+        frame->rgb_img = rgb_ptr->image.clone();  // 深拷贝
+        
+        // 2. 解析位姿并转换到相机坐标系（必须在点云转换之前）
+        // Odom给的是IMU(无人机本体)坐标系的位姿
+        Eigen::Quaterniond q_imu(odom_msg->pose.pose.orientation.w,
+                                 odom_msg->pose.pose.orientation.x,
+                                 odom_msg->pose.pose.orientation.y,
+                                 odom_msg->pose.pose.orientation.z);
+        Eigen::Matrix3d R_w_i = q_imu.toRotationMatrix();  // 世界系到IMU系
+        Eigen::Vector3d t_w_i(odom_msg->pose.pose.position.x,
+                              odom_msg->pose.pose.position.y,
+                              odom_msg->pose.pose.position.z);
+        
+        // 设置机体位姿（IMU/Body to World）
+        frame->setIMUPose(R_w_i, t_w_i);
+        
+        // 坐标系变换：相机到世界 (Camera to World)
+        // T_c_w：从相机坐标系到世界坐标系的变换
+        // R_c_w = R_w_i * R_i_c（相机到世界的旋转）
+        // t_c_w = R_w_i * t_i_c + t_w_i（相机在世界坐标系下的位置）
+        // 使用公式：p_world = R_c_w * p_camera + t_c_w
+        Eigen::Matrix3d R_c_w = R_w_i * R_i_c_;
+        Eigen::Vector3d t_c_w = R_w_i * t_i_c_ + t_w_i;
+        frame->setCameraPose(R_c_w, t_c_w);
+        
+        // 3. 将深度图转换为点云（使用上面计算的位姿）
+        int step = 3;
+        frame->pg.reserve((depth_msg->height / step) * (depth_msg->width / step));
+        
+        for (int v = 0; v < depth_msg->height; v += step)
+        {
+            for (int u = 0; u < depth_msg->width; u += step)
             {
-                std::lock_guard<std::mutex> lock(mask_mutex_);
+                float depth = depth_msg->data[v * depth_msg->width + u];
                 
-                // 检查是否有 mask，且不能太旧（1秒内）
-                if (latest_mask_msg_ && (ros::Time::now() - mask_update_time_).toSec() < 1.0) {
-                    try {
-                        cv_bridge::CvImagePtr mask_ptr = cv_bridge::toCvCopy(
-                            latest_mask_msg_, sensor_msgs::image_encodings::MONO8);
-                        
-                        // 检查 mask 有效性
-                        if (mask_ptr->image.rows == frame.rgb_img.rows && 
-                            mask_ptr->image.cols == frame.rgb_img.cols) {
-                            int valid_pixels = cv::countNonZero(mask_ptr->image);
-                            if (valid_pixels > 0) {
-                                frame.mask = mask_ptr->image.clone();  // 深拷贝
-                                frame.has_valid_mask = true;
-                                frame.bbox = computeBoundingBoxFromMask(frame.mask);
-                            }
+                if (depth <= reconstructor_->config_.min_depth || 
+                    depth >= reconstructor_->config_.max_depth) continue;
+                
+                // 深度图反投影到相机坐标系（使用相机模型）
+                // cam2world 返回单位方向向量（bearing vector），乘以深度得到3D点
+                Eigen::Vector3d bearing = frame->c2f(u, v);  // 像素 -> 归一化平面（单位向量）
+                Eigen::Vector3d point_cam = bearing * depth;  // 方向向量 * 深度 = 3D点
+                
+                // 转换到世界坐标系（使用FrameData的f2w方法）
+                Eigen::Vector3d point_world = frame->f2w(point_cam);
+                
+                // 填充点云结构
+                pointWithVar pt;
+                pt.point_c = point_cam;                           // 相机坐标系
+                pt.point_i = R_i_c_ * point_cam + t_i_c_;        // IMU坐标系
+                pt.point_w = point_world;                         // 世界坐标系
+                
+                // 协方差（深度误差与距离成正比）
+                double sigma_depth = 0.01 * depth;
+                pt.var_nostate = Eigen::Matrix3d::Identity() * sigma_depth * sigma_depth;
+                pt.body_var = pt.var_nostate;
+                pt.var = pt.var_nostate;
+                
+                // 法向量（相机光轴方向）
+                pt.normal = Eigen::Vector3d(0, 0, 1);
+                
+                frame->pg.push_back(pt);
+            }
+        }
+        
+        // 4. 从mask中提取白色像素坐标
+        std::lock_guard<std::mutex> lock(mask_mutex_);
+        frame->px_mask.clear();
+        
+        // 检查是否有 mask，且不能太旧（1秒内）
+        if (latest_mask_msg_ && (ros::Time::now() - mask_update_time_).toSec() < 1.0) 
+        {
+            cv_bridge::CvImagePtr mask_ptr = cv_bridge::toCvCopy(
+                latest_mask_msg_, sensor_msgs::image_encodings::MONO8);
+            
+            if (mask_ptr->image.rows == frame->rgb_img.rows && 
+                mask_ptr->image.cols == frame->rgb_img.cols)
+            {
+                const cv::Mat& mask = mask_ptr->image;
+                
+                // 计算包围框
+                frame->bbox = computeBoundingBoxFromMask(mask);
+                
+                // 只在bbox内遍历，提取白色像素
+                for (int v = frame->bbox.y_min; v <= frame->bbox.y_max; v++)
+                {
+                    const uchar* row_ptr = mask.ptr<uchar>(v);
+                    for (int u = frame->bbox.x_min; u <= frame->bbox.x_max; u++)
+                    {
+                        if (row_ptr[u] >= 128)
+                        {
+                            frame->px_mask.emplace_back(u, v);
                         }
-                    } catch (cv_bridge::Exception& e) {
-                        ROS_WARN_THROTTLE(5.0, "Failed to convert mask: %s", e.what());
                     }
                 }
-            }
-            
-            // 如果没有有效的 mask，跳过该帧
-            if (!frame.has_valid_mask) {
-                ROS_WARN_THROTTLE(2.0, "No valid mask available, skipping frame");
-                return;
-            }
-            
-            // 4. 解析位姿并转换到相机坐标系
-            // Odom给的是IMU(无人机本体)坐标系的位姿
-            Eigen::Quaterniond q_imu(odom_msg->pose.pose.orientation.w,
-                                     odom_msg->pose.pose.orientation.x,
-                                     odom_msg->pose.pose.orientation.y,
-                                     odom_msg->pose.pose.orientation.z);
-            Eigen::Matrix3d R_w_i = q_imu.toRotationMatrix();  // 世界系到IMU系
-            Eigen::Vector3d t_w_i(odom_msg->pose.pose.position.x,
-                                  odom_msg->pose.pose.position.y,
-                                  odom_msg->pose.pose.position.z);
-            
-            // 保存机体位姿
-            frame.R_w_i = R_w_i;
-            frame.t_w_i = t_w_i;
-            
-            // 坐标系变换：相机到世界 (Camera to World)
-            // T_c_w：从相机坐标系到世界坐标系的变换
-            // R_c_w = R_w_i * R_i_c（相机到世界的旋转）
-            // t_c_w = R_w_i * t_i_c + t_w_i（相机在世界坐标系下的位置）
-            // 使用公式：p_world = R_c_w * p_camera + t_c_w
-            frame.camera_R = R_w_i * R_i_c_;
-            frame.camera_t = R_w_i * t_i_c_ + t_w_i;
-            
-            // 5. 将帧数据加入处理队列
-            {
-                std::unique_lock<std::mutex> lock(queue_mutex_);
                 
-                // 如果队列满了，丢弃最旧的帧
-                if (frame_queue_.size() >= static_cast<size_t>(max_queue_size_)) {
-                    frame_queue_.pop_front();
-                    frame_count_dropped_++;
-                    ROS_WARN_THROTTLE(1.0, "Frame queue full! Dropping oldest frame. Dropped: %d", 
-                                     frame_count_dropped_);
+                if (!frame->px_mask.empty())
+                {
+                    frame->has_valid_mask = true;
+                    ROS_DEBUG_THROTTLE(1.0, "Extracted %zu white pixels from mask", 
+                                      frame->px_mask.size());
                 }
-                
-                frame_queue_.push_back(frame);
-                queue_cv_.notify_one();  // 通知处理线程
             }
-            
-            ROS_INFO_THROTTLE(5.0, "Producer: Queue size = %zu, Received = %d, Processed = %d, Dropped = %d", 
-                             frame_queue_.size(), frame_count_received_, 
-                             frame_count_processed_, frame_count_dropped_);
-            
-        } catch (cv_bridge::Exception& e) {
-            ROS_ERROR("cv_bridge exception: %s", e.what());
-            return;
-        } catch (std::exception& e) {
-            ROS_ERROR("Exception in sync callback: %s", e.what());
+        }
+        
+        // 5. 如果没有有效的 mask，跳过该帧
+        if (!frame->has_valid_mask) {
+            ROS_WARN_THROTTLE(2.0, "No valid mask available, skipping frame");
             return;
         }
+        
+        // 6. 将帧数据加入处理队列
+        std::unique_lock<std::mutex> queue_lock(queue_mutex_);
+        
+        // 如果队列满了，丢弃最旧的帧
+        if (frame_queue_.size() >= static_cast<size_t>(max_queue_size_)) {
+            frame_queue_.pop_front();
+            frame_count_dropped_++;
+            ROS_WARN_THROTTLE(1.0, "Frame queue full! Dropping oldest frame. Dropped: %d", 
+                             frame_count_dropped_);
+        }
+        
+        frame_queue_.push_back(frame);
+        queue_cv_.notify_one();  // 通知处理线程
+        
+        ROS_INFO_THROTTLE(5.0, "Producer: Queue size = %zu, Received = %d, Processed = %d, Dropped = %d", 
+                         frame_queue_.size(), frame_count_received_, 
+                         frame_count_processed_, frame_count_dropped_);
     }
     
     // ========== 处理线程（消费者）==========
@@ -384,65 +407,53 @@ private:
     {
         ROS_INFO("Processing thread started!");
         
-        while (ros::ok() && processing_thread_running_) {
-            FrameData frame;
+        while (ros::ok() && processing_thread_running_) 
+        {
+            FrameDataPtr frame;
             
             // 从队列中取出一帧数据
-            {
-                std::unique_lock<std::mutex> lock(queue_mutex_);
-                
-                // 等待队列非空或线程停止信号
-                queue_cv_.wait(lock, [this] { 
-                    return !frame_queue_.empty() || !processing_thread_running_; 
-                });
-                
-                // 检查是否需要退出
-                if (!processing_thread_running_ && frame_queue_.empty()) {
-                    break;
-                }
-                
-                // 取出队首数据
-                if (!frame_queue_.empty()) {
-                    frame = frame_queue_.front();
-                    frame_queue_.pop_front();
-                }
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            
+            // 等待队列非空或线程停止信号
+            queue_cv_.wait(lock, [this] { 
+                return !frame_queue_.empty() || !processing_thread_running_; 
+            });
+            
+            // 检查是否需要退出
+            if (!processing_thread_running_ && frame_queue_.empty()) {
+                break;
             }
             
+            // 取出队首数据
+            if (!frame_queue_.empty()) {
+                frame = frame_queue_.front();
+                frame_queue_.pop_front();
+            }
+            
+            lock.unlock();  // 手动解锁，避免在处理数据时持有锁
+            
             // 处理数据（无锁，可以长时间运行）
-            if (frame.has_valid_mask && reconstructor_ != nullptr) {
-                try {
-                    // 1. 处理重建
-                    reconstructor_->processFrameWithMask(
-                        frame.rgb_img, 
-                        frame.depth_img, 
-                        frame.mask, 
-                        frame.bbox,
-                        frame.camera_R, 
-                        frame.camera_t, 
-                        frame.timestamp);
-                    
-                    // 2. 发布原始深度点云（机体系 + 全局系）
-                    publishDepthClouds(frame);
-                    
-                    // 3. 发布当前帧重建点云（机体系）
-                    publishCurrentFrameReconstructedCloud(frame);
-                    
-                    // 4. 更新最后一帧的位姿（用于累积地图的机体系发布）
-                    {
-                        std::lock_guard<std::mutex> lock(pose_mutex_);
-                        last_R_w_i_ = frame.R_w_i;
-                        last_t_w_i_ = frame.t_w_i;
-                    }
-                    
-                    frame_count_processed_++;
-                    
-                } catch (std::exception& e) {
-                    ROS_ERROR("Exception in processing thread: %s", e.what());
-                }
+            if (frame && frame->has_valid_mask && reconstructor_ != nullptr) {
+                // 1. 处理重建
+                reconstructor_->processFrameWithMask(frame);
+                
+                // // 2. 发布原始深度点云（机体系 + 全局系）
+                // publishDepthClouds(frame);
+                
+                // // 3. 发布当前帧重建点云（机体系）
+                // publishCurrentFrameReconstructedCloud(frame);
+                
+                // // 4. 更新最后一帧的位姿（用于累积地图的机体系发布）
+                // pose_mutex_.lock();
+                // last_R_w_i_ = frame->T_w_i_.rotation_matrix();
+                // last_t_w_i_ = frame->T_w_i_.translation();
+                // pose_mutex_.unlock();
+                
+                // frame_count_processed_++;
             }
         }
         
-        ROS_INFO("Processing thread stopped!");
+    ROS_INFO("Processing thread stopped!");
     }
     
     // 发布当前帧重建点云（机体坐标系）
@@ -538,65 +549,24 @@ private:
         return bbox;
     }
     
-    // 发布深度点云（机体坐标系和全局坐标系）
-    void publishDepthClouds(const FrameData& frame)
+    // 发布深度点云（机体坐标系和全局坐标系）- 使用已转换的点云数据
+    void publishDepthClouds(const FrameDataPtr& frame)
     {
-        if (frame.depth_img.empty()) return;
+        if (!frame || frame->pg.empty()) return;
         
-        // 获取相机内参
-        double fx, fy, cx, cy;
-        if (reconstructor_ != nullptr) {
-            fx = reconstructor_->fx_;
-            fy = reconstructor_->fy_;
-            cx = reconstructor_->cx_;
-            cy = reconstructor_->cy_;
-        } else {
-            ROS_WARN_THROTTLE(5.0, "Reconstructor is null, using default camera intrinsics");
-            fx = fy = 615.0;
-            cx = frame.depth_img.cols / 2.0;
-            cy = frame.depth_img.rows / 2.0;
-        }
-        
-        // 生成机体坐标系（相机坐标系）点云
+        // 直接使用 FrameData 中已经转换好的点云数据
         std::vector<Eigen::Vector3d> points_body;
         std::vector<Eigen::Vector3d> points_global;
-        std::vector<Eigen::Vector3i> colors;
+        std::vector<Eigen::Vector3i> colors(frame->pg.size(), Eigen::Vector3i(255, 255, 255));
         
-        // 降采样：每隔N个像素采样一个点
-        int step = 4;  // 降采样步长
+        points_body.reserve(frame->pg.size());
+        points_global.reserve(frame->pg.size());
         
-        for (int v = 0; v < frame.depth_img.rows; v += step) 
+        for (const auto& pt : frame->pg)
         {
-            for (int u = 0; u < frame.depth_img.cols; u += step) 
-            {
-                // 获取深度值
-                float depth = frame.depth_img.at<float>(v, u);
-                
-                // 深度有效性检查
-                if (depth <= 0.01f || depth > 10.0f || !std::isfinite(depth)) {
-                    continue;
-                }
-                
-                // 1. 反投影到相机坐标系
-                Eigen::Vector3d p_camera;
-                p_camera.x() = (u - cx) * depth / fx;
-                p_camera.y() = (v - cy) * depth / fy;
-                p_camera.z() = depth;
-                
-                // 2. 转换到机体坐标系: p_body = R_i_c^T * (p_camera - t_i_c)
-                Eigen::Vector3d p_body = R_i_c_ * p_camera + t_i_c_;
-                Eigen::Vector3d p_global = frame.camera_R * p_camera + frame.camera_t;
-                points_body.push_back(p_body);
-                points_global.push_back(p_global);
-                // 获取颜色（如果有RGB图）
-                if (!frame.rgb_img.empty() && 
-                    v < frame.rgb_img.rows && u < frame.rgb_img.cols) {
-                    cv::Vec3b color = frame.rgb_img.at<cv::Vec3b>(v, u);
-                    colors.push_back(Eigen::Vector3i(color[2], color[1], color[0])); // BGR -> RGB
-                } else {
-                    colors.push_back(Eigen::Vector3i(255, 255, 255)); // 白色
-                }
-            }
+            points_body.push_back(pt.point_i);  // IMU/Body坐标系
+            points_global.push_back(pt.point_w);  // 世界坐标系
+            // TODO: 如果需要颜色，可以从 rgb_img 中根据像素坐标提取
         }
         
         // 1. 发布机体坐标系点云（frame_id: body）
@@ -772,8 +742,8 @@ private:
     std::thread processing_thread_;
     bool processing_thread_running_;
     
-    // 帧数据队列（线程安全）
-    std::deque<FrameData> frame_queue_;
+    // 帧数据队列（线程安全）- 使用智能指针避免数据拷贝
+    std::deque<FrameDataPtr> frame_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     int max_queue_size_;
@@ -782,6 +752,9 @@ private:
     int frame_count_received_ = 0;
     int frame_count_processed_ = 0;
     int frame_count_dropped_ = 0;
+    
+    // ========== 相机模型 ==========
+    vk::AbstractCamera* cam_;  //!< 相机模型（用于坐标投影）
     
     // ========== 外参标定 ==========
     // IMU(无人机本体)到相机的外参变换

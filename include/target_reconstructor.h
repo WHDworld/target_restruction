@@ -12,6 +12,7 @@
 #include "voxel_map.h"
 #include "visual_point.h"
 #include "feature.h"
+#include "frame.h"
 #include <ros/ros.h>
 #include <sensor_msgs/Image.h>
 #include <geometry_msgs/PoseStamped.h>
@@ -26,10 +27,13 @@ struct ReconstructionConfig
     int image_width;
     int image_height;
     int grid_size;                  // 网格划分大小（像素）- 控制最终点云密度
-    int border_pixels;              // 图像边界（像素）
+    int border_pixels;              // 图像边界（像素）- 简单边界检查
+    int border;                     // 安全边界（像素）- 用于 patch 提取等操作，防止图像边界越界
     int sampling_step_inside_mask;  // mask内的采样步长（密集）
     int sampling_step_outside_mask; // mask外的采样步长（稀疏）
-    
+    int patch_size_total;
+    int patch_size;
+    int patch_size_half;
     // 深度过滤
     double min_depth;               // 最小深度（米）
     double max_depth;               // 最大深度（米）
@@ -50,7 +54,7 @@ struct ReconstructionConfig
     bool enable_tsdf;               // 是否使用TSDF融合
     
     ReconstructionConfig() 
-        : image_width(640), image_height(480), grid_size(40), border_pixels(20),
+        : image_width(640), image_height(480), grid_size(40), border_pixels(20), border(40),
           sampling_step_inside_mask(1), sampling_step_outside_mask(5),
           min_depth(0.1), max_depth(5.0), depth_noise_threshold(0.05),
           min_shi_tomasi_score(5.0), max_points_per_grid(1),
@@ -118,24 +122,14 @@ public:
      * @param camera_t 相机平移向量
      * @param timestamp 时间戳
      */
-    void processFrameWithMask(
-        const Mat& rgb_img,
-        const Mat& depth_img,
-        const Mat& mask,
-        const BoundingBox& bbox,
-        const M3D& camera_R,
-        const V3D& camera_t,
-        double timestamp);
+    void processFrameWithMask(const FrameDataPtr& new_frame);
     
     /**
      * @brief 从检测框内生成新的视觉点
      */
     void generateVisualPoints(
         const Mat& rgb_img,
-        const Mat& depth_img,
-        const BoundingBox& bbox,
-        const M3D& camera_R,
-        const V3D& camera_t);
+        std::vector<pointWithVar> &pg);
     
     /**
      * @brief 从检测框内生成新的视觉点（使用 Mask 进行精确筛选）
@@ -149,31 +143,9 @@ public:
         const V3D& camera_t);
     
     /**
-     * @brief 从地图中检索可见的视觉点
-     */
-    std::vector<VisualPoint*> retrieveVisiblePoints(
-        const BoundingBox& bbox,
-        const M3D& camera_R,
-        const V3D& camera_t);
-    
-    /**
-     * @brief 更新已观测的视觉点
-     */
-    void updateVisualPoints(
-        const Mat& rgb_img,
-        const std::vector<VisualPoint*>& visible_points,
-        const M3D& camera_R,
-        const V3D& camera_t);
-    
-    /**
      * @brief 更新已观测的视觉点（使用 Mask 进行精确筛选）
      */
-    void updateVisualPointsWithMask(
-        const Mat& rgb_img,
-        const Mat& mask,
-        const std::vector<VisualPoint*>& visible_points,
-        const M3D& camera_R,
-        const V3D& camera_t);
+    void updateVisualPoints(const Mat& gray_img);
     
     // ========== 特征提取 ==========
     /**
@@ -237,7 +209,8 @@ public:
     
     // ========== 相机内参（public以便外部访问）==========
     double fx_, fy_, cx_, cy_;          // 焦距和主点
-    
+    ReconstructionConfig config_;
+    int total_points_;
     /**
      * @brief 获取最后一帧生成的点云（相机坐标系）
      * @param points 输出：点坐标
@@ -248,18 +221,22 @@ public:
         colors = last_frame_colors_;
     }
     
-    void retrieveFromVisualSparseMap(cv::Mat img, cv::Mat depth_img, std::vector<V2D> &candidates);
+    void retrieveFromVisualSparseMap(std::vector<pointWithVar> &pg, std::vector<VisualPoint*>& visible_points);
+
+    void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
+
+    void updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+
 private:
     // ========== 配置参数 ==========
-    ReconstructionConfig config_;
     
     // ========== 核心数据 ==========
     VoxelMapManager* map_manager_;      // 视觉地图管理器
     
     // 当前帧数据（缓存）
-    Mat current_rgb_;
-    Mat current_depth_;
-    BoundingBox current_bbox_;
+    cv::Mat current_rgb_;
+    std::vector<pointWithVar> current_pg_;
+    std::vector<Eigen::Vector2d> current_px_mask_;
     M3D current_R_;                     // 相机到世界的旋转
     V3D current_t_;                     // 相机到世界的平移
     double current_timestamp_;
@@ -267,7 +244,6 @@ private:
     // 网格划分（用于特征选择）
     int grid_n_width_;                  // 网格列数
     int grid_n_height_;                 // 网格行数
-    std::vector<float> grid_scores_;    // 每个网格的最大响应值
     std::vector<V2D> grid_candidates_;  // 每个网格选中的候选点
     
     // 统计信息
@@ -286,9 +262,19 @@ private:
     void resetGrid();
     
     std::vector<int> grid_num;
-    std::vector<int> map_index;
+    std::vector<float> map_dist;
+    std::vector<float> grid_scores_;    // 每个网格的最大响应值
+
+    std::vector<VisualPoint*> retrieve_voxel_points;
+    std::vector<VisualPoint*> visible_voxel_points;
+    std::vector<int> search_levels;
+    std::vector<int> update_flag;
+    int length;
+
+    std::vector<pointWithVar> append_voxel_points;
     std::unordered_map<VOXEL_LOCATION, int> sub_feat_map;
 
+    FrameDataPtr new_frame_;
     /**
      * @brief 检查深度是否有效
      */
